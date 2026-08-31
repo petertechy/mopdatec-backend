@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MOPDATEC WI-FI</title>
+</head>
+<body>
+  <script>
+    var params = new URLSearchParams({
+      error: "$(error)",
+      linkLogin: "$(link-login)"
+    });
+    // REPLACE with your deployed Vercel frontend URL.
+    window.location.replace("https://YOUR-FRONTEND.vercel.app/portal/error?" + params.toString());
+  </script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MOPDATEC WI-FI</title>
+</head>
+<body>
+  <script>
+    var params = new URLSearchParams({
+      username: "$(username)",
+      linkLogout: "$(link-logout)",
+      uptime: "$(uptime)",
+      bytesOutNice: "$(bytes-out-nice)",
+      bytesInNice: "$(bytes-in-nice)"
+    });
+    // REPLACE with your deployed Vercel frontend URL.
+    window.location.replace("https://YOUR-FRONTEND.vercel.app/portal/status?" + params.toString());
+  </script>
+  <noscript>
+    <p>JavaScript is required to view your session. Please enable it and reload this page.</p>
+  </noscript>
+</body>
+</html>

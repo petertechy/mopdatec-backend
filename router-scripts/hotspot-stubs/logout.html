@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MOPDATEC WI-FI</title>
+</head>
+<body>
+  <script>
+    var params = new URLSearchParams({
+      linkLogin: "$(link-login)",
+      uptime: "$(uptime)",
+      bytesOutNice: "$(bytes-out-nice)",
+      bytesInNice: "$(bytes-in-nice)"
+    });
+    // REPLACE with your deployed Vercel frontend URL.
+    window.location.replace("https://YOUR-FRONTEND.vercel.app/portal/logout?" + params.toString());
+  </script>
+</body>
+</html>

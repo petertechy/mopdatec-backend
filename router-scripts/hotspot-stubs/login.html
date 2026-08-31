@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MOPDATEC WI-FI</title>
+</head>
+<body>
+  <script>
+    // RouterOS substitutes every $(...) below server-side before this page is
+    // ever sent to the browser — by the time this script runs, these are
+    // plain string literals, not live template syntax. $(link-orig-esc) and
+    // $(link-login-only) are already URL-safe per MikroTik's own escaping;
+    // $(error) is NOT pre-escaped, so it's encoded client-side below before
+    // being appended to the query string.
+    var params = new URLSearchParams({
+      linkLoginOnly: "$(link-login-only)",
+      linkOrig: "$(link-orig-esc)",
+      linkLogout: "$(link-logout)",
+      ip: "$(ip)",
+      mac: "$(mac)",
+      error: "$(error)"
+    });
+    // REPLACE with your deployed Vercel frontend URL.
+    window.location.replace("https://YOUR-FRONTEND.vercel.app/portal/login?" + params.toString());
+  </script>
+  <noscript>
+    <p>JavaScript is required to sign in. Please enable it and reload this page.</p>
+  </noscript>
+</body>
+</html>
