@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { z } from "zod";
-import { requireAdmin } from "../middleware/auth";
+import { requireAdmin, AuthedRequest } from "../middleware/auth";
 import { createVoucherBatch, listVouchers, disableVoucher } from "../services/voucherService";
+import { logAction } from "../services/auditService";
 
 const listQuerySchema = z.object({
   search: z.string().trim().min(1).optional(),
@@ -21,13 +22,18 @@ const createSchema = z.object({
 
 // Issue 5: creation + enabling happen in this single request — the RouterOS
 // user is created with disabled=no in the same API call (see voucherService).
-vouchersRouter.post("/", async (req, res) => {
+vouchersRouter.post("/", async (req: AuthedRequest, res) => {
   const parsed = createSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
   try {
     const vouchers = await createVoucherBatch(parsed.data.planKey, parsed.data.qty);
+    await logAction(req.admin!.username, "voucher_batch_created", {
+      planKey: parsed.data.planKey,
+      qty: parsed.data.qty,
+      pins: vouchers.map((v) => v.pin),
+    });
     res.status(201).json({ vouchers });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -47,9 +53,15 @@ vouchersRouter.get("/", async (req, res) => {
 });
 
 // Issue 4: bulk-disable every active session under this PIN + block future logins.
-vouchersRouter.post("/:pin/disable", async (req, res) => {
+// Logged here at the route level (not inside voucherService.disableVoucher
+// itself) so the audit trail reflects staff actions specifically — the
+// expiry cron and the usage-cap backup enforcement also call
+// disableVoucher() directly, but those are automated, not something a
+// human decided, so they deliberately don't show up as "admin did this".
+vouchersRouter.post("/:pin/disable", async (req: AuthedRequest, res) => {
   try {
     const result = await disableVoucher(req.params.pin);
+    await logAction(req.admin!.username, "voucher_disabled", { pin: req.params.pin, ...result });
     res.json({ pin: req.params.pin, ...result });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

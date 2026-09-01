@@ -5,8 +5,35 @@ CREATE TABLE IF NOT EXISTS admins (
   id            SERIAL PRIMARY KEY,
   username      TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- NULL until an admin's sessions are explicitly revoked (lost device,
+  -- offboarding — see adminService.revokeSessions()). A JWT is rejected by
+  -- requireAdmin if it was issued (its `iat`) before this timestamp, so
+  -- bumping it invalidates every token issued so far without waiting out
+  -- the normal 12h expiry.
+  token_valid_after TIMESTAMPTZ
 );
+
+-- Idempotent companion to the column above, for databases where this
+-- schema.sql already ran once before token_valid_after existed — plain
+-- CREATE TABLE IF NOT EXISTS skips an already-existing table entirely, so
+-- re-running the file alone wouldn't add the column to those installs.
+ALTER TABLE admins ADD COLUMN IF NOT EXISTS token_valid_after TIMESTAMPTZ;
+
+-- Who did what, for actions with real consequences (voucher batch
+-- creation, voucher disable, new admin added, sessions revoked) — added
+-- once more than one admin account existed, so "who did this" has an
+-- answer beyond "someone with a shared password". Written by
+-- services/auditService.ts; not a full audit of every read.
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+  id             BIGSERIAL PRIMARY KEY,
+  admin_username TEXT NOT NULL,
+  action         TEXT NOT NULL, -- e.g. 'voucher_batch_created', 'voucher_disabled', 'admin_created', 'admin_sessions_revoked'
+  details        JSONB,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created_at ON admin_audit_log(created_at DESC);
 
 -- Mirrors plan-data.js from the original static-portal project.
 -- This table is now the single source of truth; plan-data.js (still served

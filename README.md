@@ -298,6 +298,68 @@ already in Postgres (which the router's own webhook keeps updating every
 30s regardless) — the endpoint never errors, it just may not have anything
 new to return yet.
 
+## Login rate limiting
+
+`services/loginThrottle.ts` locks out a username for 15 minutes after 5
+failed `POST /api/auth/login` attempts within a 15-minute window — in-memory,
+per-username (not per-IP, to avoid one shared office network's mistyped
+password locking out everyone behind that IP). Checked *before* the
+password is even compared, so a locked-out username gets the same `429`
+regardless of whether the password would've been right. Resets on a
+successful login, or naturally after the lockout window passes. Like the
+other in-memory timers in this codebase (expiry cron, router health), state
+resets on a process restart — an accepted trade-off, not a persistent
+lockout store.
+
+## Audit log + session revocation
+
+Added once more than one admin account existed, so two things that a
+shared single password never needed have answers now:
+
+- **"Who did that?"** — `services/auditService.ts`'s `logAction()` records
+  every `voucher_batch_created`, `voucher_disabled` (only when triggered by
+  an admin via the dashboard — the expiry cron and usage-cap backup
+  enforcement also call the same underlying `disableVoucher()`, but
+  deliberately aren't logged as an admin action), `admin_created`, and
+  `admin_sessions_revoked` event, with who did it and the relevant details
+  as JSON. `GET /api/admins/audit-log?limit=` reads it back, most recent
+  first; the dashboard's Manage Staff screen shows the last 20 as "Recent
+  Activity". A failed audit write is logged but never blocks the action
+  itself.
+- **"Kill that session"** — `admins.token_valid_after` (NULL until set) is
+  checked on every authenticated request (`requireAdmin` in
+  `middleware/auth.ts`): a JWT is rejected if it was issued (its `iat`)
+  before that timestamp. `POST /api/admins/:id/revoke-sessions`
+  (`adminService.revokeSessions()`) sets it to `now()`, instantly
+  invalidating every token issued for that admin so far — the fix for a
+  lost staff laptop or someone being let go, instead of waiting out the
+  normal 12h JWT expiry. That admin's *next* login still works fine (a
+  fresh token has a later `iat`). Costs one extra indexed lookup per
+  authenticated request; fails closed (503, not silently-allowed) if that
+  lookup itself errors.
+
+## Backend test suite
+
+`npm test` (vitest) covers the trickiest logic added this round — not a
+full suite, but a real one:
+
+- `tests/loginThrottle.test.ts` — the rate-limiter above, in isolation.
+- `tests/paymentWebhookSignature.test.ts` — Paystack HMAC signature
+  verification (valid, tampered, garbage, and missing signature/body);
+  skips itself cleanly if `PAYSTACK_SECRET_KEY` isn't set, same as the
+  feature it's testing.
+- `tests/expiryService.test.ts` and `tests/voucherServiceFilters.test.ts` —
+  real integration tests against whichever Postgres `DATABASE_URL` points
+  at (the same DB the app runs against locally), seeding distinctively-
+  prefixed rows and cleaning them up in `afterAll`. These test the actual
+  SQL (date-boundary comparison, computed `status`, search/filter/sort),
+  not a mock of it.
+
+`npm run typecheck` runs `tsc --noEmit` over both `src/` and `tests/` (a
+separate `tsconfig.test.json`, since `tests/` is intentionally excluded
+from the build's own `tsconfig.json` — test files never get compiled into
+`dist/`).
+
 ## Known follow-ups (carried over from the static-portal audit)
 
 - Premium (unlimited) plan usage display is still session-scoped only (resets on reconnect) since RouterOS never populates `remain-bytes-total` without a `limit-bytes-total` set — same underlying RouterOS limitation as before, not something a backend can work around.

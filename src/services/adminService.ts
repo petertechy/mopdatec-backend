@@ -54,6 +54,36 @@ export async function createAdmin(username: string, password: string): Promise<A
 }
 
 /**
+ * Read by middleware/auth.ts's requireAdmin on every authenticated request
+ * — a token is rejected if it was issued (its JWT `iat`) before this
+ * timestamp. Returns null (no revocation) for the common case without a
+ * second query.
+ */
+export async function getTokenValidAfter(adminId: number): Promise<Date | null> {
+  const { rows } = await pool.query<{ token_valid_after: Date | null }>(
+    "SELECT token_valid_after FROM admins WHERE id = $1",
+    [adminId],
+  );
+  return rows[0]?.token_valid_after ?? null;
+}
+
+/**
+ * Invalidates every token issued for this admin so far — the fix for "a
+ * staff laptop is lost" or "someone's let go" without waiting out the
+ * normal 12h JWT expiry. The admin's own next login issues a fresh token
+ * with a later `iat`, so this doesn't lock them out permanently, only kicks
+ * whatever session(s) already existed at the moment this was called.
+ */
+export async function revokeSessions(adminId: number): Promise<Admin> {
+  const { rows } = await pool.query<AdminRow>(
+    "UPDATE admins SET token_valid_after = now() WHERE id = $1 RETURNING *",
+    [adminId],
+  );
+  if (!rows[0]) throw new Error("Admin not found");
+  return toAdmin(rows[0]);
+}
+
+/**
  * Runs once at server startup (see index.ts). The `admins` table ships
  * empty, so on a fresh install — or on this exact upgrade, for anyone who
  * already has ADMIN_USERNAME/ADMIN_PASSWORD set — there'd be no way to log

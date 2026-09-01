@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 import { z } from "zod";
 import { env } from "../config/env";
 import { findAdminByUsername, verifyPassword } from "../services/adminService";
+import { checkLockout, recordFailedAttempt, clearAttempts } from "../services/loginThrottle";
 
 export const authRouter = Router();
 
@@ -26,11 +27,22 @@ authRouter.post("/login", async (req, res) => {
   }
   const { username, password } = parsed.data;
 
+  // Checked before touching the DB at all — a locked-out username shouldn't
+  // even get the timing signal of a real bcrypt compare.
+  const lockout = checkLockout(username);
+  if (lockout.locked) {
+    return res.status(429).json({
+      error: `Too many failed login attempts. Try again in ${lockout.retryAfterSeconds}s.`,
+    });
+  }
+
   const admin = await findAdminByUsername(username);
   if (!admin || !(await verifyPassword(password, admin.password_hash))) {
+    recordFailedAttempt(username);
     return res.status(401).json({ error: "Invalid credentials" });
   }
 
+  clearAttempts(username);
   const token = jwt.sign({ username: admin.username, adminId: admin.id }, env.jwtSecret, { expiresIn: "12h" });
   res.json({ token });
 });
