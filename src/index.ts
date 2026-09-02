@@ -12,6 +12,7 @@ import { plansRouter } from "./routes/plans";
 import { usageRouter } from "./routes/usage";
 import { portalRouter } from "./routes/portal";
 import { paymentsRouter } from "./routes/payments";
+import { statsRouter } from "./routes/stats";
 import { ensureBootstrapAdmin } from "./services/adminService";
 import { startExpiryCron } from "./services/expiryService";
 import { getCachedRouterHealth, startRouterHealthMonitor } from "./services/routerHealthService";
@@ -46,6 +47,7 @@ app.use("/api/plans", plansRouter);
 app.use("/api/usage", usageRouter);
 app.use("/api/portal", portalRouter);
 app.use("/api/payments", paymentsRouter);
+app.use("/api/stats", statsRouter);
 
 app.use((req, res) => {
   res.status(404).json({ error: `No route: ${req.method} ${req.path}` });

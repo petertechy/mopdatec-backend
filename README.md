@@ -64,7 +64,37 @@ On the MikroTik router, over WinBox New Terminal:
 ```
 /import file-name=push-usage-webhook.rsc
 ```
-Edit `$webhookUrl` and `$secret` inside that script first (must match your backend's deployed URL and `WEBHOOK_SHARED_SECRET`). This is in addition to — not a replacement for — the five setup scripts from the original static-portal project (`create-hotspot-profiles.rsc`, `sync-profile-scripts.rsc`, `migrate-legacy-vouchers.rsc`, `verify-captive-portal.rsc`, `expire-vouchers.rsc`), which still need to be run for the underlying hotspot behavior (Issues 1–3) to work at all.
+Edit `$webhookUrl` and `$secret` inside that script first (must match your backend's deployed URL and `WEBHOOK_SHARED_SECRET`).
+
+The original static-portal project referenced five other one-time setup
+scripts; none shipped in this repo, so here's what actually still applies
+for a fresh install (none of this applies if you're migrating from an
+already-running static-portal deployment — that's a different, not-yet-
+written script, since it depends on that system's exact existing data):
+
+- **`create-hotspot-profiles.rsc`** — rewritten from scratch in this repo,
+  based on the `plans` table's actual seed data. Creates the six hotspot
+  user profiles (`LS`, `standard`, `Trader Pass`, `Pro Weekly`,
+  `Pro Monthly`, `Premium`) that voucher creation references by name —
+  **required**, RouterOS rejects creating a hotspot user against a profile
+  that doesn't exist. Written without live router access this session —
+  verify it in a WinBox terminal before trusting it against real vouchers.
+- **`verify-captive-portal.rsc`** — also rewritten, as a **diagnostic**
+  rather than an auto-fix (no live router access to safely test a blind
+  firewall/DNS mutation against). Checks for the three most common causes
+  of "popup doesn't trigger": missing DNS/HTTP redirect NAT rules, and a
+  walled-garden entry accidentally allowing an OS's own captive-portal
+  canary-check domain through untouched. If it flags something, the usual
+  real fix on an incomplete setup is just re-running RouterOS's own
+  `/ip hotspot setup` wizard, which configures both correctly.
+- **`sync-profile-scripts.rsc`** and **`expire-vouchers.rsc`** — not
+  needed. Both addressed whatever the old system did at the hotspot-profile
+  level for data-cap enforcement and expiry; this backend now sets
+  `limit-bytes-total` directly per-voucher at creation time (see Issue 2 in
+  the table above) and runs its own expiry cron (`expiryService.ts`)
+  instead.
+- **`migrate-legacy-vouchers.rsc`** — not needed for a fresh install
+  (nothing pre-existing to migrate).
 
 Also make sure the RouterOS **API service** is enabled (it's off by default on some configs):
 ```
@@ -74,7 +104,25 @@ For anything reachable over the public internet, use `api-ssl` (port 8729) inste
 
 ## Deployment
 
-### Backend + Postgres → Render
+### Backend → VPS + WireGuard (recommended — see deploy/DEPLOY.md)
+Full step-by-step runbook in [`deploy/DEPLOY.md`](deploy/DEPLOY.md): a
+plain Ubuntu VPS (systemd + Caddy for automatic HTTPS) running the backend,
+connected to the router over a WireGuard tunnel
+(`router-scripts/setup-wireguard-vps-tunnel.rsc`) rather than a public
+port-forward. Postgres stays on a separate managed host (Render/Neon/
+Supabase) — the VPS only runs the Node process. Chosen over a plain
+PaaS (Render/etc.) specifically because:
+- A VPS has a static IP by default, so the router's firewall can allow
+  exactly one address instead of the whole internet — most PaaS platforms'
+  standard tiers don't give you a static outbound IP without a paid add-on.
+- The WireGuard tunnel means the RouterOS API is never exposed to the
+  public internet at all, and it works even if the router is behind
+  ISP-side CGNAT with no real public IP (the router initiates the tunnel
+  outbound) — a plain port-forward silently doesn't work in that case.
+
+### Backend + Postgres → Render (simpler, if router exposure is acceptable)
+Still valid if you'd rather not run your own VPS and are OK with the
+router-exposure trade-off documented below.
 1. Create a **Postgres** instance on Render, copy its connection string into `DATABASE_URL`.
 2. Create a **Web Service** from this repository.
    - Build command: `npm install && npm run build`
@@ -87,7 +135,7 @@ For anything reachable over the public internet, use `api-ssl` (port 8729) inste
 4. Your router must be able to reach this Render URL over the internet for `push-usage-webhook.rsc` to work — Render's default URL (`https://your-app.onrender.com`) is publicly reachable, so this works out of the box as long as your router has outbound internet access, which it already needs for normal operation.
 
 ### Router reachability note
-This backend needs a direct network path to the router's RouterOS API port (8728/8729) — this only works if the router has a public IP/reachable port-forward, or you run the backend on a network that can reach the router directly (e.g. same LAN, VPN, or a small VPS at the same site as the router). Render is a fully public-internet host, so plan your router's exposure (port-forward + firewall rules restricting to your backend's outbound IP, or a VPN tunnel) before pointing `ROUTEROS_HOST` at a public address.
+This backend needs a direct network path to the router's RouterOS API port (8728/8729) — this only works if the router has a public IP/reachable port-forward, or you run the backend on a network that can reach the router directly (e.g. same LAN, VPN, or a small VPS at the same site as the router). Render is a fully public-internet host with no static outbound IP on standard tiers, so a Render deployment means either opening that port to the whole internet (protected only by RouterOS credentials + `api-ssl` TLS — use a strong, unique `ROUTEROS_PASSWORD` if you go this route) or paying for Render's static-IP add-on so you can scope the firewall rule to just that address. The VPS + WireGuard path above avoids this trade-off entirely.
 
 Set `CORS_ORIGIN` to your deployed frontend's URL (comma-separate if you keep a preview URL too).
 
@@ -359,6 +407,31 @@ full suite, but a real one:
 separate `tsconfig.test.json`, since `tests/` is intentionally excluded
 from the build's own `tsconfig.json` — test files never get compiled into
 `dist/`).
+
+## Dashboard overview stats
+
+`GET /api/stats/overview` (`services/statsService.ts`) backs the admin
+dashboard's Overview page stat cards — total vouchers, a status breakdown,
+vouchers created today, active sessions, and revenue (today + all-time,
+from `payments` where `status='success'`). Real Postgres aggregates
+(`COUNT`/`SUM`, run in parallel), not derived from whatever page of
+results the voucher list happens to have fetched client-side — that's
+capped (see `voucherService.listVouchers`'s `limit`) and would silently
+undercount once there are more vouchers than one page. The status
+breakdown uses the same `CASE` expression as `listVouchers` — kept in sync
+by hand, since it's the one other place that logic exists.
+
+## Analytics page
+
+`GET /api/stats/analytics?days=` (`statsService.getAnalyticsStats()`) backs
+the dashboard's Analytics page — revenue and voucher-creation trends
+(gap-filled per day via `generate_series`, so a zero-activity day is a real
+0 point, never a silently skipped one), a per-plan breakdown (voucher
+count + revenue), and a redemption rate, all scoped to the same `days`
+window so every number on the page agrees with every other. `voucher_counts`
+and `plan_revenue` are computed as separate CTEs rather than one multi-join
+— joining vouchers AND payments to `plans` in a single query would fan out
+(N vouchers × M payments per plan) and silently inflate both counts.
 
 ## Known follow-ups (carried over from the static-portal audit)
 

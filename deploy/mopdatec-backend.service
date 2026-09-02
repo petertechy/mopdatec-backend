@@ -1,0 +1,30 @@
+[Unit]
+Description=MOPDATEC WiFi backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Deploy path — adjust if you clone somewhere else. See deploy/DEPLOY.md.
+WorkingDirectory=/opt/mopdatec-backend
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=5
+User=mopdatec
+Group=mopdatec
+# No EnvironmentFile= here — src/config/env.ts already calls dotenv.config()
+# at startup, which reads .env from the process's working directory
+# (WorkingDirectory, above). Simpler than keeping two env-loading
+# mechanisms in sync, and it's the exact same loading path already proven
+# throughout local dev.
+
+# Light sandboxing — the app only needs its own directory, outbound
+# network (Postgres, RouterOS over the WireGuard tunnel, Paystack), and
+# to listen on its configured port.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/mopdatec-backend
+
+[Install]
+WantedBy=multi-user.target

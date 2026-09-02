@@ -1,0 +1,20 @@
+# Caddy automatically gets and renews a Let's Encrypt cert for whatever
+# domain you put here — no manual certbot/nginx config needed. Requires:
+# a domain's A record pointed at this VPS's IP, and ports 80+443 open
+# (Caddy uses 80 for the ACME HTTP challenge, then serves on 443).
+#
+# Replace api.yourdomain.com below, then: sudo caddy reload (or restart the
+# caddy service after copying this to /etc/caddy/Caddyfile).
+
+api.yourdomain.com {
+    # The Paystack webhook needs the raw request body untouched — Caddy's
+    # reverse_proxy doesn't buffer/transform bodies by default, so this
+    # works unmodified; nothing extra needed here for that.
+    reverse_proxy localhost:4000
+
+    encode gzip
+
+    log {
+        output file /var/log/caddy/mopdatec-backend.log
+    }
+}
