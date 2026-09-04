@@ -22,7 +22,7 @@
   :if ([:len $sessions] > 0) do={
     :local payload "["
     :local first true
-    :foreach s in=$sessions do={
+    :foreach s in $sessions do={
       :if (!$first) do={ :set payload ($payload . ",") }
       :set first false
       :local sid ($s->".id")
