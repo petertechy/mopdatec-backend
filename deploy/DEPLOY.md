@@ -4,19 +4,36 @@ Written generically for any Ubuntu 22.04+ VPS (DigitalOcean, Hetzner,
 Vultr, Linode — interchangeable for this). Postgres stays on a separate
 managed host (Render/Neon/Supabase) — the VPS only runs the Node backend.
 
+**Recommended for this app specifically: Vultr's London (GB) region, 1 vCPU
+/ 1GB plan, + Supabase Postgres in its Frankfurt (Central EU) region.**
+(Vultr does not actually offer a Lagos region despite earlier assumption
+here — confirmed by checking the live location list. Of what Vultr
+actually offers, London beats the geographically-closer Johannesburg for
+Nigeria-originating traffic: Nigeria's major submarine cables — WACS,
+Glo-1, and partially MainOne — land predominantly in the UK, not South
+Africa, and intra-Africa routing frequently backhauls through Europe
+anyway due to sparser backbone peering between African regions. London
+also pairs well with Frankfurt-region Postgres — one of the
+fastest-peered routes in Europe.) Not a generic pick either way —
+`voucherService.createVoucherBatch()` makes sequential per-voucher
+round-trips (DB insert, RouterOS API call, DB update, one at a time), so
+whatever the VPS's round-trip latency to the physical router is gets
+multiplied by every voucher in a batch — closer beats farther, within
+whatever a provider actually offers.
+
 Do these roughly in order — later steps depend on earlier ones.
 
 ## 0. Prerequisites to check first
 
 - **RouterOS version 7+** on your router: `/system resource print` in
-  WinBox. WireGuard (step 3) needs it. If you're on v6.x, stop here — that
+  WinBox. WireGuard (step 4) needs it. If you're on v6.x, stop here — that
   needs a different tunnel approach (OpenVPN), not covered by this runbook.
 - **A domain or subdomain** you can point at the VPS (e.g.
-  `api.yourdomain.com`) — needed for automatic HTTPS in step 5. Any DNS
+  `api.yourdomain.com`) — needed for automatic HTTPS in step 6. Any DNS
   provider works; you just need to create an A record once you have the
   VPS's IP.
 - **Whether your router has a real public WAN IP or is behind CGNAT** —
-  doesn't actually matter for this runbook (WireGuard in step 3 works
+  doesn't actually matter for this runbook (WireGuard in step 4 works
   either way, since the router initiates the tunnel outbound), but good to
   know: if you were ever tempted to just port-forward instead, CGNAT would
   silently make that not work at all.
@@ -38,7 +55,33 @@ ufw allow 443/tcp                # HTTPS
 ufw enable
 ```
 
-## 2. Install Node.js and Caddy
+## 2. Set up Postgres (Supabase)
+
+1. Sign up at [supabase.com](https://supabase.com), **New Project**.
+2. Region: pick the EU option closest to Lagos — **Central EU (Frankfurt)**
+   if offered, otherwise whichever European region is available. Set a
+   strong database password (you'll need it in a moment).
+3. Once the project's done provisioning, click **Connect** (top of the
+   dashboard) → **Session pooler** tab. Use this one, not "Direct
+   connection" — despite direct being the theoretically-better fit for a
+   single long-running process (no pooler indirection), Supabase's direct
+   connection hostname (`db.<ref>.supabase.co`) is **IPv6-only** in most
+   regions now, and most VPS providers (Vultr included) don't give you
+   working IPv6 by default. Trying the direct connection from an
+   IPv4-only VPS fails with `ENETUNREACH`. The session pooler
+   (`aws-0-<region>.pooler.supabase.com:5432`, via Supavisor) is
+   IPv4-compatible and behaves like a normal persistent connection —
+   fine for `pg.Pool`'s usage pattern here, unlike the *transaction*
+   pooler (port `6543`), which has prepared-statement/session-state
+   restrictions this app doesn't need to deal with.
+4. That connection string is your `DATABASE_URL` for step 5 below — looks
+   like `postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres`
+   — note the username is `postgres.<project-ref>`, not just `postgres`
+   (different from the direct connection's username). Set
+   `DATABASE_SSL=true` alongside it (Supabase requires TLS;
+   `src/db/pool.ts` already handles this when that flag is set).
+
+## 3. Install Node.js and Caddy
 
 ```bash
 # Node.js 20 LTS via NodeSource
@@ -52,7 +95,7 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /
 apt update && apt install -y caddy
 ```
 
-## 3. WireGuard tunnel to the router
+## 4. WireGuard tunnel to the router
 
 This is what lets the VPS reach the RouterOS API without exposing it to
 the whole internet, and works even behind CGNAT (see step 0). Read the
@@ -110,7 +153,7 @@ ping 10.10.10.2   # the router, over the tunnel
 `verify-captive-portal.rsc` from `router-scripts/` — see the main
 `README.md`'s router section for what each does.
 
-## 4. Deploy the backend code
+## 5. Deploy the backend code
 
 ```bash
 su - mopdatec
@@ -128,9 +171,8 @@ nano .env
 ```
 
 Key values for this deployment specifically:
-- `DATABASE_URL` — from your managed Postgres (Render/Neon/Supabase)
-- `DATABASE_SSL=true` — managed Postgres providers require this
-- `ROUTEROS_HOST=10.10.10.2` — the router's WireGuard tunnel IP from step 3,
+- `DATABASE_URL` / `DATABASE_SSL=true` — from step 2 (Supabase)
+- `ROUTEROS_HOST=10.10.10.2` — the router's WireGuard tunnel IP from step 4,
   **not** its LAN or WAN address
 - `ROUTEROS_PORT=8728`, `ROUTEROS_TLS=false` — plain API is fine here since
   the WireGuard tunnel is already fully encrypted; no need for `api-ssl`
@@ -141,7 +183,7 @@ Key values for this deployment specifically:
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD` — real values, not dev placeholders
   (only used once, to seed the first admin — see `adminService.ensureBootstrapAdmin()`)
 - `CORS_ORIGIN` — your frontend's Vercel URL (may not exist yet — circular
-  with frontend deploy, see step 7)
+  with frontend deploy, see step 8)
 - `PAYSTACK_SECRET_KEY` / `PAYSTACK_PUBLIC_KEY` — your test or live keys
 
 ```bash
@@ -149,7 +191,7 @@ npm run build
 exit   # back to root/sudo user
 ```
 
-## 5. systemd service + Caddy
+## 6. systemd service + Caddy
 
 ```bash
 sudo cp /opt/mopdatec-backend/deploy/mopdatec-backend.service /etc/systemd/system/
@@ -174,14 +216,14 @@ Should return `{"ok":true,"routerConnected":true,...}` — `routerConnected:
 true` confirms the WireGuard tunnel is actually working end-to-end, not
 just that the backend process started.
 
-## 6. Run the migration once
+## 7. Run the migration once
 
 ```bash
 cd /opt/mopdatec-backend
 node dist/db/migrate.js
 ```
 
-## 7. Frontend, then close the CORS loop
+## 8. Frontend, then close the CORS loop
 
 Deploy the frontend to Vercel per its own `README.md`, with
 `VITE_API_URL=https://api.yourdomain.com`. Once you have the resulting
@@ -191,7 +233,7 @@ then:
 sudo systemctl restart mopdatec-backend
 ```
 
-## 8. Router-side URLs + Paystack webhook
+## 9. Router-side URLs + Paystack webhook
 
 - Replace `YOUR-FRONTEND.vercel.app` in each
   `router-scripts/hotspot-stubs/*.html` with your real Vercel domain, then
@@ -205,7 +247,7 @@ sudo systemctl restart mopdatec-backend
 - Register `https://api.yourdomain.com/api/payments/webhook` in the
   [Paystack dashboard](https://dashboard.paystack.co/#/settings/developer).
 
-## 9. Verify end to end
+## 10. Verify end to end
 
 - `GET https://api.yourdomain.com/api/health` → `routerConnected: true`
 - Log into the deployed dashboard, create a test voucher, confirm
