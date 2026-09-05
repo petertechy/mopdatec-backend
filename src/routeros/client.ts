@@ -33,17 +33,22 @@ export interface CreateHotspotUserParams {
   pin: string;
   profile: string;
   bytesLimit: number | null; // null = unlimited (Premium) — omit limit-bytes-total entirely
-  expiresAt: string; // YYYY-MM-DD, stamped into the comment field (see expire-vouchers.rsc logic)
+  expiresAt: string; // full ISO timestamp (see voucherService.expiryTimestamp) — reformatted below
+  // for the router comment, which is informational only; the backend's own
+  // expiryService cron is what actually disables the voucher on time.
 }
 
 export async function createHotspotUser(params: CreateHotspotUserParams): Promise<void> {
   await withConnection(async (api) => {
+    // "2026-09-06 14:32 UTC" — readable at a glance in WinBox, vs. dumping
+    // the raw "2026-09-06T14:32:10.185Z" ISO string into the comment.
+    const expiresLabel = new Date(params.expiresAt).toISOString().replace("T", " ").slice(0, 16) + " UTC";
     const words = [
       `=name=${params.pin}`,
       `=password=${params.pin}`,
       `=profile=${params.profile}`,
       "=disabled=no", // Issue 5: created AND enabled in the same call
-      `=comment=expires=${params.expiresAt}`,
+      `=comment=expires=${expiresLabel}`,
     ];
     if (params.bytesLimit !== null) {
       words.push(`=limit-bytes-total=${params.bytesLimit}`);

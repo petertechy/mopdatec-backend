@@ -9,14 +9,14 @@ const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
  * every test run also waiting out a RouterOS connection timeout for each
  * overdue voucher's disable attempt.
  *
- * Compared against the UTC date, not Postgres's session-local CURRENT_DATE,
- * because voucherService.expiryDateString() stamps expires_at using UTC —
- * they need to agree on what "today" means or this drifts by a day near
- * midnight depending on server timezone.
+ * A direct timestamp comparison — expires_at is a real TIMESTAMPTZ (see
+ * voucherService.expiryTimestamp()), stamped as exactly created_at + plan
+ * duration, so `now() >= expires_at` is the true expiry moment rather than
+ * a calendar-date cutoff at the following midnight.
  */
 export async function findOverdueVoucherPins(): Promise<string[]> {
   const { rows } = await pool.query<{ pin: string }>(
-    `SELECT pin FROM vouchers WHERE disabled = false AND expires_at <= (now() AT TIME ZONE 'utc')::date`,
+    `SELECT pin FROM vouchers WHERE disabled = false AND expires_at <= now()`,
   );
   return rows.map((r) => r.pin);
 }

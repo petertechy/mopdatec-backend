@@ -30,7 +30,7 @@ export async function getOverviewStats(): Promise<OverviewStats> {
       `SELECT status, count(*)::text FROM (
          SELECT CASE
            WHEN disabled THEN 'disabled'
-           WHEN expires_at <= (now() AT TIME ZONE 'utc')::date THEN 'expired'
+           WHEN expires_at <= now() THEN 'expired'
            WHEN NOT router_synced THEN 'not_synced'
            ELSE 'active'
          END AS status

@@ -33,10 +33,16 @@ async function generateUniquePin(prefix: string): Promise<string> {
   throw new Error(`Could not generate a unique PIN for prefix "${prefix}" after ${MAX_ATTEMPTS} attempts`);
 }
 
-function expiryDateString(durationDays: number): string {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() + durationDays);
-  return d.toISOString().slice(0, 10); // YYYY-MM-DD, matches RouterOS clock comparison
+/**
+ * Real 24h-per-day expiry, measured from the exact moment of creation — NOT
+ * rounded down to a calendar date. The old version stamped only a YYYY-MM-DD
+ * date, which meant a voucher bought at 8pm for a "1 day" plan expired at
+ * the next midnight (~4 hours later), while one bought at 1am got nearly 47
+ * hours — both wrong. This gives every voucher its full nominal duration
+ * regardless of what time of day it was created.
+ */
+function expiryTimestamp(durationDays: number): string {
+  return new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString();
 }
 
 export interface CreatedVoucher {
@@ -67,7 +73,7 @@ export async function createVoucherBatch(planKey: string, qty: number): Promise<
 
   for (let i = 0; i < qty; i++) {
     const pin = await generateUniquePin(plan.prefix);
-    const expiresAt = expiryDateString(plan.durationDays);
+    const expiresAt = expiryTimestamp(plan.durationDays);
 
     await pool.query(
       `INSERT INTO vouchers (pin, plan_key, expires_at, router_synced) VALUES ($1, $2, $3, false)`,
@@ -123,9 +129,10 @@ export interface ListVouchersOptions {
  * fetching everything and filtering client-side (Issue: "becomes unusable
  * past a few hundred vouchers" once VoucherList.tsx has to render/scan the
  * whole table itself). `status` is computed here — same expiry rule
- * expiryService.ts uses (compare against the UTC date, not Postgres's
- * session-local CURRENT_DATE) — so the badge in VoucherList and the filter
- * dropdown can never disagree with each other.
+ * expiryService.ts uses (a direct timestamp comparison against `now()`, now
+ * that expires_at is a real TIMESTAMPTZ rather than a calendar date) — so
+ * the badge in VoucherList and the filter dropdown can never disagree with
+ * each other.
  *
  * The outer WHERE against an aliased subquery (rather than repeating the
  * CASE expression) is just so `status` filtering can reference the
@@ -141,7 +148,7 @@ export async function listVouchers(opts: ListVouchersOptions = {}): Promise<Vouc
               v.expires_at, v.redeemed_at, v.router_synced,
               CASE
                 WHEN v.disabled THEN 'disabled'
-                WHEN v.expires_at <= (now() AT TIME ZONE 'utc')::date THEN 'expired'
+                WHEN v.expires_at <= now() THEN 'expired'
                 WHEN NOT v.router_synced THEN 'not_synced'
                 ELSE 'active'
               END AS status

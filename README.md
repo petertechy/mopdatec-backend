@@ -266,9 +266,12 @@ same DB-update-plus-router-disable path the dashboard's manual disable
 button already uses. This replaces reliance on `expire-vouchers.rsc`'s
 hourly on-router scheduler (up to ~59min lag past a plan's exact validity
 window); the new lag ceiling is ~5min, and detection no longer depends on
-the router's own scheduler running at all. Compares against the UTC date
-(not Postgres's session-local `CURRENT_DATE`) to stay consistent with how
-`voucherService.expiryDateString()` stamps `expires_at` in the first place.
+the router's own scheduler running at all. `expires_at` is a real
+`TIMESTAMPTZ` — stamped as exactly `created_at + plan.duration_days` by
+`voucherService.expiryTimestamp()`, not rounded down to a calendar date — so
+a voucher bought at 8pm for a "1 day" plan actually gets a full 24 hours,
+not just until the next midnight. The cron's own check is a plain
+`expires_at <= now()` comparison against that same timestamp.
 A voucher that fails to disable (e.g. router unreachable) is simply retried
 on the next tick — it stays `disabled=false` until a disable actually
 succeeds.

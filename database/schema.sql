@@ -60,13 +60,22 @@ CREATE TABLE IF NOT EXISTS vouchers (
   plan_key     TEXT NOT NULL REFERENCES plans(key),
   disabled     BOOLEAN NOT NULL DEFAULT false,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-  expires_at   DATE NOT NULL,             -- date-only, matches RouterOS clock comparison logic
+  expires_at   TIMESTAMPTZ NOT NULL,      -- full timestamp: exactly created_at + plan.duration_days,
+                                           -- NOT rounded to a calendar date (see voucherService.expiryTimestamp)
   redeemed_at  TIMESTAMPTZ,               -- first successful login, NULL until then
   router_synced BOOLEAN NOT NULL DEFAULT false -- true once the RouterOS API create call succeeded
 );
 
 CREATE INDEX IF NOT EXISTS idx_vouchers_plan_key ON vouchers(plan_key);
 CREATE INDEX IF NOT EXISTS idx_vouchers_expires_at ON vouchers(expires_at);
+
+-- Idempotent companion for installs where vouchers already existed with the
+-- old DATE-only expires_at (see the column comment above) — CREATE TABLE IF
+-- NOT EXISTS above is a no-op on those, so the widen has to happen here.
+-- Existing rows keep their calendar date, now read back as that date's
+-- midnight UTC; only newly-created vouchers get the real 24h-from-creation
+-- timestamp via voucherService.expiryTimestamp().
+ALTER TABLE vouchers ALTER COLUMN expires_at TYPE TIMESTAMPTZ USING expires_at::timestamptz;
 
 -- One row per usage push/poll per active session. Keyed by session_id (RouterOS's
 -- internal .id for the active-session entry), NOT by IP — IPs get recycled by
