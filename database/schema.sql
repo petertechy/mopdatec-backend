@@ -63,11 +63,31 @@ CREATE TABLE IF NOT EXISTS vouchers (
   expires_at   TIMESTAMPTZ NOT NULL,      -- full timestamp: exactly created_at + plan.duration_days,
                                            -- NOT rounded to a calendar date (see voucherService.expiryTimestamp)
   redeemed_at  TIMESTAMPTZ,               -- first successful login, NULL until then
-  router_synced BOOLEAN NOT NULL DEFAULT false -- true once the RouterOS API create call succeeded
+  router_synced BOOLEAN NOT NULL DEFAULT false, -- true once the RouterOS API create call succeeded
+  -- Lifetime usage tracking — see the "bank on session change" comment on
+  -- usageService.ingestUsageEvent(). RouterOS's own bytes-in/bytes-out on an
+  -- active session are SESSION-scoped and reset to 0 every time that session
+  -- gets recycled (WiFi drop, phone sleep, manual logout+login) — reading
+  -- those directly (the original bug) made total usage appear to reset on
+  -- every reconnect. usage_banked_bytes holds everything from sessions that
+  -- have already been superseded; usage_current_session_bytes holds the
+  -- live count for whichever session_id is currently open. True lifetime
+  -- total is always banked + current — never read either alone.
+  usage_banked_bytes BIGINT NOT NULL DEFAULT 0,
+  usage_current_session_id TEXT,
+  usage_current_session_bytes BIGINT NOT NULL DEFAULT 0,
+  usage_last_recorded_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_vouchers_plan_key ON vouchers(plan_key);
 CREATE INDEX IF NOT EXISTS idx_vouchers_expires_at ON vouchers(expires_at);
+
+-- latest_usage (defined further below) SELECTs v.expires_at, so on an
+-- install where that view already exists, Postgres refuses to retype the
+-- column underneath it ("cannot alter type of a column used by a view or
+-- rule") — drop it first; the real CREATE VIEW below recreates it once
+-- usage_snapshots (which it also SELECTs from) exists further down.
+DROP VIEW IF EXISTS latest_usage;
 
 -- Idempotent companion for installs where vouchers already existed with the
 -- old DATE-only expires_at (see the column comment above) — CREATE TABLE IF
@@ -76,6 +96,17 @@ CREATE INDEX IF NOT EXISTS idx_vouchers_expires_at ON vouchers(expires_at);
 -- midnight UTC; only newly-created vouchers get the real 24h-from-creation
 -- timestamp via voucherService.expiryTimestamp().
 ALTER TABLE vouchers ALTER COLUMN expires_at TYPE TIMESTAMPTZ USING expires_at::timestamptz;
+
+-- Same idempotent-migration need for the usage-tracking columns above, on
+-- installs where vouchers already existed without them. Existing vouchers
+-- start at banked=0/no current session — the very next webhook push picks
+-- up their real in-progress session correctly (RouterOS's own session
+-- counter hasn't reset just because we deployed), so only usage from
+-- sessions that had *already ended* before this migration is unrecoverable.
+ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS usage_banked_bytes BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS usage_current_session_id TEXT;
+ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS usage_current_session_bytes BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS usage_last_recorded_at TIMESTAMPTZ;
 
 -- One row per usage push/poll per active session. Keyed by session_id (RouterOS's
 -- internal .id for the active-session entry), NOT by IP — IPs get recycled by
@@ -96,20 +127,26 @@ CREATE INDEX IF NOT EXISTS idx_usage_voucher_pin ON usage_snapshots(voucher_pin)
 CREATE INDEX IF NOT EXISTS idx_usage_session_id ON usage_snapshots(session_id);
 CREATE INDEX IF NOT EXISTS idx_usage_recorded_at ON usage_snapshots(recorded_at DESC);
 
--- Convenience view: latest snapshot per active session, joined to voucher + plan.
+-- Convenience view: latest snapshot per active session (for its IP/IN-SESSION
+-- freshness), joined to the VOUCHER's cumulative usage totals (not the raw
+-- per-session bytes_in/bytes_out, which reset on reconnect — see the
+-- usage_banked_bytes comment on the vouchers table) plus its plan.
 -- This is what the dashboard's initial GET /api/usage/active reads from.
-CREATE OR REPLACE VIEW latest_usage AS
+-- DROP first, not CREATE OR REPLACE: this redefinition removes columns
+-- (bytes_in/bytes_out/bytes_remaining) that the live version already has,
+-- and Postgres only allows OR REPLACE to append columns, never drop them.
+DROP VIEW IF EXISTS latest_usage;
+CREATE VIEW latest_usage AS
 SELECT DISTINCT ON (us.session_id)
   us.session_id,
   us.voucher_pin,
   us.ip_address,
-  us.bytes_in,
-  us.bytes_out,
-  us.bytes_remaining,
   us.recorded_at,
   v.plan_key,
   v.disabled,
   v.expires_at,
+  v.usage_banked_bytes,
+  v.usage_current_session_bytes,
   p.label       AS plan_label,
   p.bytes_limit AS plan_bytes_limit
 FROM usage_snapshots us

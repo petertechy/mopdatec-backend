@@ -25,10 +25,10 @@ export interface UsageRow {
 
 function mapLatestUsageRow(r: any): UsageRow {
   const bytesLimit = r.plan_bytes_limit === null ? null : Number(r.plan_bytes_limit);
-  const bytesUsed =
-    r.bytes_remaining !== null && bytesLimit !== null
-      ? Math.max(0, bytesLimit - Number(r.bytes_remaining))
-      : Number(r.bytes_in) + Number(r.bytes_out);
+  // Voucher-level cumulative total (banked + current session) — NOT the raw
+  // per-session bytes_in/bytes_out, which reset every time a session gets
+  // recycled. See the usage_banked_bytes comment on the vouchers table.
+  const bytesUsed = Number(r.usage_banked_bytes) + Number(r.usage_current_session_bytes);
 
   return {
     sessionId: r.session_id,
@@ -67,12 +67,17 @@ export interface PortalUsage {
  * Unlike RouterOS's own status.html, this isn't scoped to "the device currently
  * making this request" — it looks up by PIN directly, since the PIN is already
  * the sole credential in this system (same trust model as router login itself).
- * Falls back to voucher/plan info with zero usage if no session snapshot has
+ * Falls back to voucher/plan info with zero usage if no usage event has
  * landed yet (e.g. right after redemption, before the first webhook push).
+ *
+ * bytesUsed is the voucher's cumulative lifetime total (usage_banked_bytes +
+ * usage_current_session_bytes, maintained by ingestUsageEvent) — NOT a raw
+ * session snapshot, which would reset to near-zero on every reconnect.
  */
 export async function getUsageForVoucher(pin: string): Promise<PortalUsage | null> {
   const voucherRes = await pool.query(
-    `SELECT v.pin, v.disabled, v.expires_at, p.label, p.bytes_limit
+    `SELECT v.pin, v.disabled, v.expires_at, v.usage_banked_bytes, v.usage_current_session_bytes,
+            v.usage_last_recorded_at, p.label, p.bytes_limit
      FROM vouchers v JOIN plans p ON p.key = v.plan_key
      WHERE v.pin = $1`,
     [pin],
@@ -80,25 +85,9 @@ export async function getUsageForVoucher(pin: string): Promise<PortalUsage | nul
   if (voucherRes.rows.length === 0) return null;
   const v = voucherRes.rows[0];
   const bytesLimit = v.bytes_limit === null ? null : Number(v.bytes_limit);
-
-  const snapRes = await pool.query(
-    `SELECT bytes_in, bytes_out, bytes_remaining, recorded_at FROM usage_snapshots
-     WHERE voucher_pin = $1 ORDER BY recorded_at DESC LIMIT 1`,
-    [pin],
-  );
-
-  let bytesUsed = 0;
-  let hasActiveSession = false;
-  let recordedAt: string | null = null;
-  if (snapRes.rows.length > 0) {
-    const s = snapRes.rows[0];
-    hasActiveSession = new Date(s.recorded_at).getTime() > Date.now() - 10 * 60 * 1000;
-    recordedAt = s.recorded_at;
-    bytesUsed =
-      s.bytes_remaining != null && bytesLimit !== null
-        ? Math.max(0, bytesLimit - Number(s.bytes_remaining))
-        : Number(s.bytes_in) + Number(s.bytes_out);
-  }
+  const bytesUsed = Number(v.usage_banked_bytes) + Number(v.usage_current_session_bytes);
+  const recordedAt: string | null = v.usage_last_recorded_at;
+  const hasActiveSession = recordedAt !== null && new Date(recordedAt).getTime() > Date.now() - 10 * 60 * 1000;
 
   return {
     pin: v.pin,
@@ -169,15 +158,43 @@ export async function markRedeemed(pin: string): Promise<void> {
 
 /**
  * Ingests one usage event from the router's webhook push (or the manual
- * polling fallback). Writes the snapshot, and if the voucher's plan has a
- * byte cap that's been reached, triggers the disable flow immediately as a
- * BACKUP enforcement path — the PRIMARY enforcement is still RouterOS's own
- * native limit-bytes-total (Issue 2 fix), which cuts the connection at the
- * packet level regardless of whether this webhook call ever arrives.
+ * polling fallback), and returns the voucher's up-to-date CUMULATIVE usage
+ * (not just this one event's raw numbers).
+ *
+ * RouterOS's own bytes-in/bytes-out on an active session are SESSION-scoped:
+ * they start back at 0 every time that session gets recycled (WiFi drop,
+ * phone sleep, manual logout+login with the same PIN) even though the
+ * voucher's real lifetime usage hasn't reset at all. Reading those directly
+ * as "bytesUsed" was the bug — a portal refresh right after a reconnect
+ * would show almost nothing used, discarding every previous session's
+ * total. The fix banks each session's final known total into
+ * vouchers.usage_banked_bytes the moment a DIFFERENT session_id shows up
+ * for the same voucher, so the running total survives reconnects:
+ *
+ *   same session_id as last time  -> just overwrite usage_current_session_bytes
+ *                                     (RouterOS's own counter only grows within
+ *                                     one session, so the latest reading IS
+ *                                     the correct up-to-date value for it)
+ *   new/different session_id      -> bank the OLD session's last known bytes
+ *                                     into usage_banked_bytes first, THEN
+ *                                     start tracking the new session_id
+ *
+ * True lifetime total is always usage_banked_bytes + usage_current_session_bytes
+ * — that's what both getUsageForVoucher and getActiveUsage read.
+ *
+ * Also still writes the raw usage_snapshots row (history/audit — unchanged),
+ * and if the cumulative total has now reached the plan's byte cap, triggers
+ * the disable flow as a BACKUP enforcement path — the PRIMARY enforcement is
+ * still RouterOS's own native limit-bytes-total (Issue 2 fix), which cuts
+ * the connection at the packet level regardless of whether this webhook
+ * call ever arrives, and which this cumulative total now actually matches
+ * (the old session-only check could under-count usage right after a
+ * reconnect and never fire at all).
  */
 export async function ingestUsageEvent(event: IncomingUsageEvent): Promise<UsageRow | null> {
   const voucherRes = await pool.query(
-    `SELECT v.pin, v.disabled, p.bytes_limit, p.label
+    `SELECT v.pin, v.disabled, v.usage_banked_bytes, v.usage_current_session_id, v.usage_current_session_bytes,
+            p.bytes_limit, p.label
      FROM vouchers v JOIN plans p ON p.key = v.plan_key
      WHERE v.pin = $1`,
     [event.user],
@@ -194,11 +211,25 @@ export async function ingestUsageEvent(event: IncomingUsageEvent): Promise<Usage
     [event.user, event.sessionId, event.address, event.bytesIn, event.bytesOut, event.bytesRemaining ?? null],
   );
 
+  const rawSessionBytes = event.bytesIn + event.bytesOut;
+  const isNewSession = voucher.usage_current_session_id !== null && voucher.usage_current_session_id !== event.sessionId;
+  const bankedBytes = Number(voucher.usage_banked_bytes) + (isNewSession ? Number(voucher.usage_current_session_bytes) : 0);
+
+  await pool.query(
+    `UPDATE vouchers SET usage_banked_bytes = $1, usage_current_session_id = $2,
+            usage_current_session_bytes = $3, usage_last_recorded_at = now()
+     WHERE pin = $4`,
+    [bankedBytes, event.sessionId, rawSessionBytes, event.user],
+  );
+
   const bytesLimit = voucher.bytes_limit === null ? null : Number(voucher.bytes_limit);
+  // bytesRemaining, when a caller ever supplies it, is already a router-side
+  // TOTAL-remaining figure (not session-scoped) — takes priority over the
+  // banked calc when present, though no current caller actually sends it.
   const bytesUsed =
     event.bytesRemaining != null && bytesLimit !== null
       ? Math.max(0, bytesLimit - event.bytesRemaining)
-      : event.bytesIn + event.bytesOut;
+      : bankedBytes + rawSessionBytes;
 
   if (!voucher.disabled && bytesLimit !== null && bytesUsed >= bytesLimit) {
     console.log(`[usageService] voucher ${event.user} reached its cap — disabling (backup enforcement)`);
