@@ -1,4 +1,4 @@
-import { RouterOSAPI, Channel } from "node-routeros";
+import { RouterOSAPI, Channel, Receiver } from "node-routeros";
 import { env } from "../config/env";
 
 // node-routeros (1.6.9, unmaintained since Jan 2021 — no newer version
@@ -27,6 +27,24 @@ import { env } from "../config/env";
   // rather than this one patch being the only thing standing between any
   // future undiscovered protocol quirk and a full process crash.
   throw new Error(`RouterOS API: unexpected reply type "${reply}"`);
+};
+
+// Second, distinct crash found the same way: Receiver.sendTagData() throws
+// synchronously ("UNREGISTEREDTAG") whenever a reply sentence arrives tagged
+// for a request this library has already stopped listening to — a stray/
+// late packet for a Channel that already closed (e.g. it already got its
+// "!done" and cleaned up, but one more trailing sentence for that same tag
+// arrives right after). Nothing depends on that data anymore — there's no
+// pending promise left to resolve — so this is safe to just drop instead of
+// crashing the whole process over it. Same reasoning as the "!empty" patch
+// above: a plain `throw` deep inside the raw socket's own 'data' handling,
+// unreachable by any try/catch in our own code.
+(Receiver.prototype as any).sendTagData = function (this: any, currentTag: string) {
+  const tag = this.tags.get(currentTag);
+  if (tag) {
+    tag.callback(this.currentPacket);
+  }
+  this.cleanUp();
 };
 
 // node-routeros connections are not safe to share across concurrent requests
