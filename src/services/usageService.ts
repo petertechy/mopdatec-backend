@@ -212,8 +212,22 @@ export async function ingestUsageEvent(event: IncomingUsageEvent): Promise<Usage
   );
 
   const rawSessionBytes = event.bytesIn + event.bytesOut;
-  const isNewSession = voucher.usage_current_session_id !== null && voucher.usage_current_session_id !== event.sessionId;
-  const bankedBytes = Number(voucher.usage_banked_bytes) + (isNewSession ? Number(voucher.usage_current_session_bytes) : 0);
+  const lastKnownSessionBytes = Number(voucher.usage_current_session_bytes);
+  const sessionIdChanged = voucher.usage_current_session_id !== null && voucher.usage_current_session_id !== event.sessionId;
+  // Confirmed live (2026-09-05, voucher LS-E4MBY): RouterOS can report a
+  // LOWER byte count under the exact same session_id — a rapid logout then
+  // immediate re-login with the same PIN reused the same active-session ID
+  // even though the underlying connection had genuinely restarted from
+  // zero. Session-ID-only detection missed this entirely: two real usage
+  // peaks (120,974,736 and 772,427 bytes) got silently overwritten by the
+  // next, much smaller reading instead of being banked, so the voucher's
+  // final total was only the last few hundred KB of a session that had
+  // actually used well over 100MB. A real active session's own counter can
+  // only ever grow, so a decrease is itself proof this is a new session in
+  // disguise, regardless of what session_id RouterOS claims.
+  const counterWentBackwards = !sessionIdChanged && rawSessionBytes < lastKnownSessionBytes;
+  const isNewSession = sessionIdChanged || counterWentBackwards;
+  const bankedBytes = Number(voucher.usage_banked_bytes) + (isNewSession ? lastKnownSessionBytes : 0);
 
   await pool.query(
     `UPDATE vouchers SET usage_banked_bytes = $1, usage_current_session_id = $2,
