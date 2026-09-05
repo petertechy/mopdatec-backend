@@ -1,6 +1,6 @@
 import { pool } from "../db/pool";
 import { getPlan } from "./planService";
-import { createHotspotUser, disableVoucherEverywhere } from "../routeros/client";
+import { createHotspotUser, disableVoucherEverywhere, deleteHotspotUserEverywhere } from "../routeros/client";
 
 // Excludes visually-ambiguous characters (0/O, 1/I/L) — same charset choice
 // as the original admin.html generator, kept for printed-voucher legibility.
@@ -179,4 +179,37 @@ export async function disableVoucher(pin: string): Promise<{ sessionsRemoved: nu
   const result = await disableVoucherEverywhere(pin);
   await pool.query("UPDATE vouchers SET disabled = true WHERE pin = $1", [pin]);
   return result;
+}
+
+export class VoucherHasHistoryError extends Error {
+  constructor(pin: string) {
+    super(`Voucher ${pin} has usage or payment history and can't be deleted — disable it instead.`);
+    this.name = "VoucherHasHistoryError";
+  }
+}
+
+/**
+ * Real removal — unlike disableVoucher, this actually drops the row (and the
+ * router-side hotspot user). Only allowed when the voucher has never
+ * actually been used: usage_snapshots and payments both reference a
+ * voucher's pin, so deleting one with real history would either violate
+ * that foreign key or silently destroy usage/revenue records depending on
+ * how it failed. Reserved for cleaning up mistakes — a wrong quantity, a
+ * duplicate batch, a voucher nobody ever redeemed or paid for. Anything
+ * with real activity should be disabled, not deleted, so the record stays
+ * for accounting/audit purposes.
+ */
+export async function deleteVoucher(pin: string): Promise<void> {
+  const { rows } = await pool.query(
+    `SELECT
+       EXISTS(SELECT 1 FROM usage_snapshots WHERE voucher_pin = $1) AS has_usage,
+       EXISTS(SELECT 1 FROM payments WHERE voucher_pin = $1) AS has_payment`,
+    [pin],
+  );
+  if (rows[0].has_usage || rows[0].has_payment) {
+    throw new VoucherHasHistoryError(pin);
+  }
+
+  await deleteHotspotUserEverywhere(pin);
+  await pool.query("DELETE FROM vouchers WHERE pin = $1", [pin]);
 }

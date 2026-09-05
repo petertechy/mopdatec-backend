@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { requireAdmin, AuthedRequest } from "../middleware/auth";
-import { createVoucherBatch, listVouchers, disableVoucher } from "../services/voucherService";
+import { createVoucherBatch, listVouchers, disableVoucher, deleteVoucher, VoucherHasHistoryError } from "../services/voucherService";
 import { logAction } from "../services/auditService";
 
 const listQuerySchema = z.object({
@@ -64,6 +64,23 @@ vouchersRouter.post("/:pin/disable", async (req: AuthedRequest, res) => {
     await logAction(req.admin!.username, "voucher_disabled", { pin: req.params.pin, ...result });
     res.json({ pin: req.params.pin, ...result });
   } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Real removal — see voucherService.deleteVoucher's doc comment for why
+// this is only allowed for vouchers with no usage/payment history. A 409
+// (not 500) for that case specifically, so the frontend can show the
+// "disable instead" message rather than a generic failure.
+vouchersRouter.delete("/:pin", async (req: AuthedRequest, res) => {
+  try {
+    await deleteVoucher(req.params.pin);
+    await logAction(req.admin!.username, "voucher_deleted", { pin: req.params.pin });
+    res.json({ pin: req.params.pin, deleted: true });
+  } catch (err: any) {
+    if (err instanceof VoucherHasHistoryError) {
+      return res.status(409).json({ error: err.message });
+    }
     res.status(500).json({ error: err.message });
   }
 });
