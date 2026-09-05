@@ -82,13 +82,57 @@ export interface PaymentStatus {
   voucherPin: string | null;
 }
 
+/**
+ * Self-healing fallback for a missed webhook — confirmed live: a real
+ * payment got stuck at "pending" forever because Paystack's webhook call
+ * landed during a backend outage window and was never retried successfully.
+ * Webhook delivery was never guaranteed to begin with (Paystack's own docs
+ * say so), so relying on it alone was the actual bug, not just today's
+ * downtime. This is called from getPaymentStatus, which the customer's own
+ * "waiting for payment" screen polls every 2s for up to ~80s — the natural
+ * place to double-check Paystack's own record directly rather than trusting
+ * the webhook alone. Idempotent: fulfillPayment no-ops if already fulfilled,
+ * and this only runs while status is still "pending".
+ */
+async function reconcileWithPaystack(reference: string): Promise<void> {
+  if (!env.paystack.secretKey) return;
+  try {
+    const res = await fetch(`${PAYSTACK_BASE}/transaction/verify/${reference}`, {
+      headers: { Authorization: `Bearer ${env.paystack.secretKey}` },
+    });
+    const data: any = await res.json();
+    if (!res.ok || !data.status) return;
+
+    if (data.data?.status === "success") {
+      await fulfillPayment(reference);
+    } else if (data.data?.status === "failed" || data.data?.status === "abandoned") {
+      await markPaymentFailed(reference);
+    }
+  } catch (err: any) {
+    // Paystack unreachable or rate-limited — the next poll (2s later) just
+    // tries again; the customer's screen keeps showing "Confirming..." in
+    // the meantime rather than erroring out over a transient check.
+    console.error(`[paymentService] Paystack reconcile failed for ${reference}:`, err.message);
+  }
+}
+
 export async function getPaymentStatus(reference: string): Promise<PaymentStatus | null> {
   const { rows } = await pool.query(
     "SELECT reference, status, plan_key, voucher_pin FROM payments WHERE reference = $1",
     [reference],
   );
   if (!rows.length) return null;
-  const r = rows[0];
+  let r = rows[0];
+
+  if (r.status === "pending") {
+    await reconcileWithPaystack(reference);
+    const refreshed = await pool.query(
+      "SELECT reference, status, plan_key, voucher_pin FROM payments WHERE reference = $1",
+      [reference],
+    );
+    r = refreshed.rows[0];
+  }
+
   return { reference: r.reference, status: r.status, planKey: r.plan_key, voucherPin: r.voucher_pin };
 }
 
