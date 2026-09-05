@@ -14,9 +14,18 @@
 # only the frontend domain lets the HTML/JS load but leaves every fetch()
 # call from it silently blocked.
 #
+# The www variant is required too — Vercel automatically redirects between
+# the bare and www forms of a custom domain (whichever isn't set as
+# primary), so even though the hotspot stubs hardcode the bare domain, an
+# unauthenticated client can still get bounced to the other form along the
+# way. Missing it here isn't a cosmetic gap: the walled garden blocks
+# whatever host isn't explicitly listed, so that redirect just fails
+# silently for the customer (confirmed live — this exact gap was why a
+# fresh login attempt "wasn't loading").
+#
 # REPLACE the domains below with your actual deployed hostnames.
 
-:local portalDomains {"mopdatecwifi.com"; "api.mopdatecwifi.com"}
+:local portalDomains {"mopdatecwifi.com"; "www.mopdatecwifi.com"; "api.mopdatecwifi.com"}
 
 :foreach portalDomain in=$portalDomains do={
   :if ([:len [/ip hotspot walled-garden find dst-host=$portalDomain]] = 0) do={
@@ -28,5 +37,5 @@
   }
 }
 
-:put "--- confirm both rules are active ---"
-/ip hotspot walled-garden print where dst-host="mopdatecwifi.com" or dst-host="api.mopdatecwifi.com"
+:put "--- confirm all three rules are active ---"
+/ip hotspot walled-garden print where dst-host="mopdatecwifi.com" or dst-host="www.mopdatecwifi.com" or dst-host="api.mopdatecwifi.com"
