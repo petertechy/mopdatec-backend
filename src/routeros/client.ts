@@ -17,9 +17,24 @@ async function withConnection<T>(fn: (api: RouterOSAPI) => Promise<T>): Promise<
     timeout: 8,
   });
 
+  // RouterOSAPI is an EventEmitter and can emit its OWN async "error" event
+  // straight off the underlying socket — a timeout or reset mid-request,
+  // independent of whatever connect()/write() themselves return. Node.js
+  // treats an "error" event with no listener as FATAL: it crashes the
+  // entire process, not just this one call. That was happening for real —
+  // routerHealthService pings the router every 20s, and any network hiccup
+  // over the WireGuard tunnel would take the whole backend down (confirmed
+  // live via repeated systemd restarts), leaving every request — including
+  // ones with nothing to do with RouterOS — 502ing for the few seconds it
+  // takes to come back up. Racing this promise turns that into an ordinary
+  // rejection scoped to this one call instead.
+  const errorPromise = new Promise<never>((_resolve, reject) => {
+    api.once("error", reject);
+  });
+
   try {
-    await api.connect();
-    return await fn(api);
+    await Promise.race([api.connect(), errorPromise]);
+    return await Promise.race([fn(api), errorPromise]);
   } finally {
     try {
       api.close();
