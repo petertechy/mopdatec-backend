@@ -17,6 +17,30 @@ import { ensureBootstrapAdmin } from "./services/adminService";
 import { startExpiryCron } from "./services/expiryService";
 import { getCachedRouterHealth, startRouterHealthMonitor } from "./services/routerHealthService";
 
+// Last-resort net for node-routeros (1.6.9, unmaintained since Jan 2021)
+// throwing synchronously from inside its own internal socket/event-handling
+// code — not a promise rejection or an 'error' event on anything we hold a
+// reference to, so no try/catch in our own request-handling code can ever
+// be in the right call stack to catch it. This session found and fixed the
+// specific known case (see routeros/client.ts's Channel.onUnknown patch for
+// "!empty" replies), which was crashing the entire backend process on every
+// RouterOS print returning zero rows — but given how unmaintained this
+// dependency is against a RouterOS version it predates by years, treat this
+// as "the first bug we found," not "the only one that exists": anything
+// else it throws this way still crashes the process today without this
+// guard. Scoped tightly to errors that actually originate from
+// node-routeros (by stack trace) — anything else still crashes and
+// restarts normally, since swallowing an unrelated fatal bug could leave
+// the process in a genuinely broken state that's worse to keep running.
+process.on("uncaughtException", (err) => {
+  if (err?.stack?.includes("node-routeros")) {
+    console.error("[uncaughtException] swallowed a node-routeros internal error — a RouterOS call in flight failed, nothing else is affected:", err);
+    return;
+  }
+  console.error("[uncaughtException] fatal, not from node-routeros — letting the process exit so systemd restarts it clean:", err);
+  process.exit(1);
+});
+
 const app = express();
 app.use(cors({ origin: env.corsOrigins, credentials: true }));
 // `verify` stashes the exact request bytes on req.rawBody before JSON

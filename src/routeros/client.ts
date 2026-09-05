@@ -1,5 +1,33 @@
-import { RouterOSAPI } from "node-routeros";
+import { RouterOSAPI, Channel } from "node-routeros";
 import { env } from "../config/env";
+
+// node-routeros (1.6.9, unmaintained since Jan 2021 — no newer version
+// exists) predates RouterOS v7's API protocol. A `print` command that
+// matches zero rows gets a "!empty" reply on RouterOS v7 (v6 only ever sent
+// "!done" for an empty result) — a perfectly normal reply this library's
+// Channel class doesn't recognize. Its default handling for any unknown
+// reply type is to synchronously THROW, from inside the raw socket's own
+// 'data' event callback — not a promise rejection, not an 'error' event, so
+// no try/catch anywhere in OUR code can ever be in the right call stack to
+// catch it. It became an uncaught exception that killed the entire backend
+// process — confirmed live: e.g. every /ip/hotspot/active/print call made
+// while no one is connected to the hotspot, climbing the systemd restart
+// counter by the hundreds. "!empty" means exactly what "!done" with no rows
+// means, so patch it to behave that way instead. Must run before any
+// RouterOS connection is made (module load time, here, qualifies).
+(Channel.prototype as any).onUnknown = function (this: any, reply: string) {
+  if (reply === "!empty") {
+    if (!this.trapped) this.emit("done", this.data);
+    this.close();
+    return;
+  }
+  // Anything else really is unexpected — still throws (still uncatchable
+  // from our own code, same as before), but index.ts's uncaughtException
+  // guard catches RouterOS-library errors specifically as a last-resort net,
+  // rather than this one patch being the only thing standing between any
+  // future undiscovered protocol quirk and a full process crash.
+  throw new Error(`RouterOS API: unexpected reply type "${reply}"`);
+};
 
 // node-routeros connections are not safe to share across concurrent requests
 // (it's a single stateful socket with request/response framing), so we open
@@ -90,6 +118,27 @@ export async function disableVoucherEverywhere(pin: string): Promise<{ sessionsR
     }
 
     return { sessionsRemoved: active.length };
+  });
+}
+
+/**
+ * Real removal, not disable — used only for vouchers voucherService.deleteVoucher
+ * has already confirmed have no usage/payment history, so there's nothing
+ * router-side worth keeping either. Kicks any active session first (same as
+ * disableVoucherEverywhere), then removes the hotspot user entry entirely
+ * rather than just setting disabled=yes.
+ */
+export async function deleteHotspotUserEverywhere(pin: string): Promise<void> {
+  await withConnection(async (api) => {
+    const active = await api.write("/ip/hotspot/active/print", [`?user=${pin}`]);
+    for (const session of active as any[]) {
+      await api.write("/ip/hotspot/active/remove", [`=.id=${session[".id"]}`]);
+    }
+
+    const users = await api.write("/ip/hotspot/user/print", [`?name=${pin}`]);
+    for (const user of users as any[]) {
+      await api.write("/ip/hotspot/user/remove", [`=.id=${user[".id"]}`]);
+    }
   });
 }
 
