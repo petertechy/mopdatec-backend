@@ -39,7 +39,10 @@ import { env } from "../config/env";
 // crashing the whole process over it. Same reasoning as the "!empty" patch
 // above: a plain `throw` deep inside the raw socket's own 'data' handling,
 // unreachable by any try/catch in our own code.
-(Receiver.prototype as any).sendTagData = function (this: any, currentTag: string) {
+(Receiver.prototype as any).sendTagData = function (
+  this: any,
+  currentTag: string,
+) {
   const tag = this.tags.get(currentTag);
   if (tag) {
     tag.callback(this.currentPacket);
@@ -53,7 +56,9 @@ import { env } from "../config/env";
 // open. For this app's traffic volume (admin actions + periodic webhook
 // upserts, not high-frequency trading) the connection overhead is negligible
 // and it avoids an entire class of "socket got into a bad state" bugs.
-async function withConnection<T>(fn: (api: RouterOSAPI) => Promise<T>): Promise<T> {
+async function withConnection<T>(
+  fn: (api: RouterOSAPI) => Promise<T>,
+): Promise<T> {
   const api = new RouterOSAPI({
     host: env.routeros.host,
     port: env.routeros.port,
@@ -99,11 +104,15 @@ export interface CreateHotspotUserParams {
   // expiryService cron is what actually disables the voucher on time.
 }
 
-export async function createHotspotUser(params: CreateHotspotUserParams): Promise<void> {
+export async function createHotspotUser(
+  params: CreateHotspotUserParams,
+): Promise<void> {
   await withConnection(async (api) => {
     // "2026-09-06 14:32 UTC" — readable at a glance in WinBox, vs. dumping
     // the raw "2026-09-06T14:32:10.185Z" ISO string into the comment.
-    const expiresLabel = new Date(params.expiresAt).toISOString().replace("T", " ").slice(0, 16) + " UTC";
+    const expiresLabel =
+      new Date(params.expiresAt).toISOString().replace("T", " ").slice(0, 16) +
+      " UTC";
     const words = [
       `=name=${params.pin}`,
       `=password=${params.pin}`,
@@ -123,18 +132,40 @@ export async function createHotspotUser(params: CreateHotspotUserParams): Promis
  * active session under this PIN (kicks already-connected devices) AND
  * disabling the user (blocks future logins). Neither alone is sufficient.
  */
-export async function disableVoucherEverywhere(pin: string): Promise<{ sessionsRemoved: number }> {
+export async function disableVoucherEverywhere(
+  pin: string,
+): Promise<{ sessionsRemoved: number }> {
   return withConnection(async (api) => {
-    const active = await api.write("/ip/hotspot/active/print", [`?user=${pin}`]);
+    const active = await api.write("/ip/hotspot/active/print", [
+      `?user=${pin}`,
+    ]);
     for (const session of active as any[]) {
       await api.write("/ip/hotspot/active/remove", [`=.id=${session[".id"]}`]);
     }
 
     const users = await api.write("/ip/hotspot/user/print", [`?name=${pin}`]);
     for (const user of users as any[]) {
-      await api.write("/ip/hotspot/user/set", [`=.id=${user[".id"]}`, "=disabled=yes"]);
+      await api.write("/ip/hotspot/user/set", [
+        `=.id=${user[".id"]}`,
+        "=disabled=yes",
+      ]);
     }
 
+    return { sessionsRemoved: active.length };
+  });
+}
+
+/** Removes every active session for a voucher without disabling the voucher. */
+export async function logoutVoucherEverywhere(
+  pin: string,
+): Promise<{ sessionsRemoved: number }> {
+  return withConnection(async (api) => {
+    const active = await api.write("/ip/hotspot/active/print", [
+      `?user=${pin}`,
+    ]);
+    for (const session of active as any[]) {
+      await api.write("/ip/hotspot/active/remove", [`=.id=${session[".id"]}`]);
+    }
     return { sessionsRemoved: active.length };
   });
 }
@@ -148,7 +179,9 @@ export async function disableVoucherEverywhere(pin: string): Promise<{ sessionsR
  */
 export async function deleteHotspotUserEverywhere(pin: string): Promise<void> {
   await withConnection(async (api) => {
-    const active = await api.write("/ip/hotspot/active/print", [`?user=${pin}`]);
+    const active = await api.write("/ip/hotspot/active/print", [
+      `?user=${pin}`,
+    ]);
     for (const session of active as any[]) {
       await api.write("/ip/hotspot/active/remove", [`=.id=${session[".id"]}`]);
     }

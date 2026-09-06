@@ -1,5 +1,10 @@
 import { Router } from "express";
-import { getUsageForVoucher, refreshVoucherUsage, markRedeemed } from "../services/usageService";
+import {
+  getUsageForVoucher,
+  refreshVoucherUsage,
+  markRedeemed,
+} from "../services/usageService";
+import { logoutVoucherEverywhere } from "../routeros/client";
 
 export const portalRouter = Router();
 
@@ -20,6 +25,23 @@ portalRouter.post("/usage/:pin/refresh", async (req, res) => {
   const usage = await refreshVoucherUsage(req.params.pin.toUpperCase());
   if (!usage) return res.status(404).json({ error: "Voucher not found" });
   res.json(usage);
+});
+
+// Removes all active devices using this voucher, but leaves the voucher
+// enabled so the customer can log in again on any device.
+portalRouter.post("/logout-all/:pin", async (req, res) => {
+  try {
+    const result = await logoutVoucherEverywhere(req.params.pin.toUpperCase());
+    res.json(result);
+  } catch (err: any) {
+    console.error(
+      "[portal] failed to log out voucher sessions:",
+      err?.message || err,
+    );
+    res
+      .status(503)
+      .json({ error: "Could not disconnect the voucher sessions right now" });
+  }
 });
 
 // Called by the portal login page immediately after it submits the auth form
