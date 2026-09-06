@@ -9,6 +9,7 @@ import {
   lookupPaymentsByEmail,
 } from "../services/paymentService";
 import { getIO } from "../sockets/io";
+import { env } from "../config/env";
 
 export const paymentsRouter = Router();
 
@@ -28,8 +29,13 @@ paymentsRouter.post("/initialize", async (req, res) => {
   }
   try {
     const origin = req.headers.origin || `${req.protocol}://${req.get("host")}`;
-    const callbackUrl = `${origin}/portal/buy/complete`;
-    const result = await initializePayment(parsed.data.planKey, parsed.data.email, callbackUrl);
+    const callbackUrl =
+      env.paystack.callbackUrl || `${origin}/portal/buy/complete`;
+    const result = await initializePayment(
+      parsed.data.planKey,
+      parsed.data.email,
+      callbackUrl,
+    );
     res.status(201).json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -80,10 +86,17 @@ paymentsRouter.post("/webhook", async (req, res) => {
 
   const event = req.body;
   try {
-    if (event?.event === "charge.success") {
-      await fulfillPayment(event.data.reference);
-      getIO().emit("payment:fulfilled", { reference: event.data.reference });
-    } else if (event?.event === "charge.failed") {
+    if (
+      event?.event === "charge.success" &&
+      typeof event.data?.reference === "string"
+    ) {
+      const fulfilled = await fulfillPayment(event.data.reference, event.data);
+      if (fulfilled)
+        getIO().emit("payment:fulfilled", { reference: event.data.reference });
+    } else if (
+      event?.event === "charge.failed" &&
+      typeof event.data?.reference === "string"
+    ) {
       await markPaymentFailed(event.data.reference);
     }
   } catch (err: any) {

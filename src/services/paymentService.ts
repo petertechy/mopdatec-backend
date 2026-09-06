@@ -59,7 +59,10 @@ export async function initializePayment(
     [data.data.reference, plan.key, email, plan.priceKobo],
   );
 
-  return { reference: data.data.reference, authorizationUrl: data.data.authorization_url };
+  return {
+    reference: data.data.reference,
+    authorizationUrl: data.data.authorization_url,
+  };
 }
 
 /**
@@ -69,9 +72,15 @@ export async function initializePayment(
  * object — see index.ts's express.json({ verify }) hook, which stashes it
  * on req.rawBody for this exact purpose.
  */
-export function verifyWebhookSignature(rawBody: Buffer | undefined, signature: string | undefined): boolean {
+export function verifyWebhookSignature(
+  rawBody: Buffer | undefined,
+  signature: string | undefined,
+): boolean {
   if (!rawBody || !signature || !env.paystack.secretKey) return false;
-  const hash = crypto.createHmac("sha512", env.paystack.secretKey).update(rawBody).digest("hex");
+  const hash = crypto
+    .createHmac("sha512", env.paystack.secretKey)
+    .update(rawBody)
+    .digest("hex");
   return hash === signature;
 }
 
@@ -97,26 +106,37 @@ export interface PaymentStatus {
 async function reconcileWithPaystack(reference: string): Promise<void> {
   if (!env.paystack.secretKey) return;
   try {
-    const res = await fetch(`${PAYSTACK_BASE}/transaction/verify/${reference}`, {
-      headers: { Authorization: `Bearer ${env.paystack.secretKey}` },
-    });
+    const res = await fetch(
+      `${PAYSTACK_BASE}/transaction/verify/${reference}`,
+      {
+        headers: { Authorization: `Bearer ${env.paystack.secretKey}` },
+      },
+    );
     const data: any = await res.json();
     if (!res.ok || !data.status) return;
 
     if (data.data?.status === "success") {
-      await fulfillPayment(reference);
-    } else if (data.data?.status === "failed" || data.data?.status === "abandoned") {
+      await fulfillPayment(reference, data.data);
+    } else if (
+      data.data?.status === "failed" ||
+      data.data?.status === "abandoned"
+    ) {
       await markPaymentFailed(reference);
     }
   } catch (err: any) {
     // Paystack unreachable or rate-limited — the next poll (2s later) just
     // tries again; the customer's screen keeps showing "Confirming..." in
     // the meantime rather than erroring out over a transient check.
-    console.error(`[paymentService] Paystack reconcile failed for ${reference}:`, err.message);
+    console.error(
+      `[paymentService] Paystack reconcile failed for ${reference}:`,
+      err.message,
+    );
   }
 }
 
-export async function getPaymentStatus(reference: string): Promise<PaymentStatus | null> {
+export async function getPaymentStatus(
+  reference: string,
+): Promise<PaymentStatus | null> {
   const { rows } = await pool.query(
     "SELECT reference, status, plan_key, voucher_pin FROM payments WHERE reference = $1",
     [reference],
@@ -133,7 +153,12 @@ export async function getPaymentStatus(reference: string): Promise<PaymentStatus
     r = refreshed.rows[0];
   }
 
-  return { reference: r.reference, status: r.status, planKey: r.plan_key, voucherPin: r.voucher_pin };
+  return {
+    reference: r.reference,
+    status: r.status,
+    planKey: r.plan_key,
+    voucherPin: r.voucher_pin,
+  };
 }
 
 /**
@@ -142,14 +167,33 @@ export async function getPaymentStatus(reference: string): Promise<PaymentStatus
  * double-send even after a 200, so a reference that's already fulfilled
  * (has a voucher_pin) is a no-op rather than issuing a second voucher.
  */
-export async function fulfillPayment(reference: string): Promise<void> {
-  const { rows } = await pool.query("SELECT * FROM payments WHERE reference = $1", [reference]);
+export async function fulfillPayment(
+  reference: string,
+  transaction?: any,
+): Promise<boolean> {
+  const { rows } = await pool.query(
+    "SELECT * FROM payments WHERE reference = $1",
+    [reference],
+  );
   if (!rows.length) {
-    console.warn(`[paymentService] webhook for unknown reference: ${reference}`);
-    return;
+    console.warn(
+      `[paymentService] webhook for unknown reference: ${reference}`,
+    );
+    return false;
   }
   const payment = rows[0];
-  if (payment.voucher_pin) return; // already fulfilled
+  if (payment.voucher_pin) return true; // already fulfilled
+
+  if (
+    transaction &&
+    (Number(transaction.amount) !== Number(payment.amount_kobo) ||
+      (transaction.currency && transaction.currency !== "NGN"))
+  ) {
+    console.error(
+      `[paymentService] Paystack amount/currency mismatch for ${reference}`,
+    );
+    return false;
+  }
 
   const [voucher] = await createVoucherBatch(payment.plan_key, 1);
 
@@ -157,6 +201,7 @@ export async function fulfillPayment(reference: string): Promise<void> {
     `UPDATE payments SET status = 'success', voucher_pin = $1, verified_at = now() WHERE reference = $2`,
     [voucher.pin, reference],
   );
+  return true;
 }
 
 export async function markPaymentFailed(reference: string): Promise<void> {
@@ -191,7 +236,9 @@ export interface PaymentLookupResult {
  * rather than building out email verification, but worth knowing if this
  * ever needs to be hardened.
  */
-export async function lookupPaymentsByEmail(email: string): Promise<PaymentLookupResult[]> {
+export async function lookupPaymentsByEmail(
+  email: string,
+): Promise<PaymentLookupResult[]> {
   const { rows } = await pool.query(
     `SELECT p.reference, p.plan_key, pl.label AS plan_label, p.voucher_pin, p.created_at,
             v.expires_at, v.disabled

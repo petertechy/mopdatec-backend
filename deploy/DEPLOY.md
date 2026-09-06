@@ -71,7 +71,7 @@ ufw enable
    IPv4-only VPS fails with `ENETUNREACH`. The session pooler
    (`aws-0-<region>.pooler.supabase.com:5432`, via Supavisor) is
    IPv4-compatible and behaves like a normal persistent connection —
-   fine for `pg.Pool`'s usage pattern here, unlike the *transaction*
+   fine for `pg.Pool`'s usage pattern here, unlike the _transaction_
    pooler (port `6543`), which has prepared-statement/session-state
    restrictions this app doesn't need to deal with.
 4. That connection string is your `DATABASE_URL` for step 5 below — looks
@@ -104,6 +104,7 @@ anything on the router — it explains what each part does and one thing to
 double-check afterward (firewall rule order).
 
 **On the VPS:**
+
 ```bash
 apt install -y wireguard
 wg genkey | tee /etc/wireguard/privatekey | wg pubkey > /etc/wireguard/publickey
@@ -111,6 +112,7 @@ cat /etc/wireguard/publickey   # save this — the router needs it
 ```
 
 Create `/etc/wireguard/wg0.conf` (as root):
+
 ```ini
 [Interface]
 PrivateKey = <contents of /etc/wireguard/privatekey>
@@ -145,6 +147,7 @@ connects out to the VPS on its own — nothing further needed on the
 router's side to keep the tunnel alive.
 
 Once `wg show` shows a handshake, verify from the VPS:
+
 ```bash
 ping 10.10.10.2   # the router, over the tunnel
 ```
@@ -165,12 +168,14 @@ npm install
 ```
 
 Create `.env` (copy `.env.example` and fill in real values):
+
 ```bash
 cp .env.example .env
 nano .env
 ```
 
 Key values for this deployment specifically:
+
 - `DATABASE_URL` / `DATABASE_SSL=true` — from step 2 (Supabase)
 - `ROUTEROS_HOST=10.10.10.2` — the router's WireGuard tunnel IP from step 4,
   **not** its LAN or WAN address
@@ -185,6 +190,9 @@ Key values for this deployment specifically:
 - `CORS_ORIGIN` — your frontend's Vercel URL (may not exist yet — circular
   with frontend deploy, see step 8)
 - `PAYSTACK_SECRET_KEY` / `PAYSTACK_PUBLIC_KEY` — your test or live keys
+- `PAYSTACK_CALLBACK_URL` — your frontend's full URL ending in
+  `/portal/buy/complete`, so Paystack redirects customers to the deployed
+  frontend even when the initialize request has no browser `Origin` header
 
 ```bash
 npm run build
@@ -201,6 +209,7 @@ sudo systemctl status mopdatec-backend   # should show "active (running)"
 ```
 
 Point your domain's A record at the VPS's IP now, if you haven't. Then:
+
 ```bash
 sudo cp /opt/mopdatec-backend/deploy/Caddyfile /etc/caddy/Caddyfile
 sudo nano /etc/caddy/Caddyfile   # replace api.yourdomain.com with your real domain
@@ -209,9 +218,11 @@ sudo systemctl reload caddy
 
 Caddy fetches a Let's Encrypt cert automatically on first request — give it
 a minute, then:
+
 ```bash
 curl https://api.yourdomain.com/api/health
 ```
+
 Should return `{"ok":true,"routerConnected":true,...}` — `routerConnected:
 true` confirms the WireGuard tunnel is actually working end-to-end, not
 just that the backend process started.
@@ -229,6 +240,7 @@ Deploy the frontend to Vercel per its own `README.md`, with
 `VITE_API_URL=https://api.yourdomain.com`. Once you have the resulting
 Vercel URL, go back and set `CORS_ORIGIN` in the backend's `.env` to it,
 then:
+
 ```bash
 sudo systemctl restart mopdatec-backend
 ```

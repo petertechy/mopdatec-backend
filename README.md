@@ -13,14 +13,14 @@ dashboard.
 
 ## What this fixes vs. the static-portal version
 
-| Issue | Static-portal version | This app |
-|---|---|---|
-| 1 — popup not triggering | `verify-captive-portal.rsc` (manual run) | Same script, still required — this is a router-side fix regardless of what talks to it |
-| 2 — data limit overshoot | `limit-bytes-total` set via pasted command | Set via `POST /api/vouchers` → RouterOS API call, no copy-paste |
-| 3 — disable + redirect | Two-command paste from `admin.html` | `POST /api/vouchers/:pin/disable` does both steps atomically |
-| 4 — bulk-disable shared voucher | Manual "generate disable command" | Same endpoint as #3 — one click in the dashboard |
-| 5 — one-step voucher creation | `disabled=no` in the pasted command | Same, but also now checks PIN uniqueness against the database before creating (audit finding #3 fix) |
-| Plan pricing desync (audit #2) | Hardcoded separately in `login.html` | `plans` table is the only source of truth; `GET /api/plans/export.js` regenerates `plan-data.js` for the router's static pages |
+| Issue                           | Static-portal version                      | This app                                                                                                                       |
+| ------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| 1 — popup not triggering        | `verify-captive-portal.rsc` (manual run)   | Same script, still required — this is a router-side fix regardless of what talks to it                                         |
+| 2 — data limit overshoot        | `limit-bytes-total` set via pasted command | Set via `POST /api/vouchers` → RouterOS API call, no copy-paste                                                                |
+| 3 — disable + redirect          | Two-command paste from `admin.html`        | `POST /api/vouchers/:pin/disable` does both steps atomically                                                                   |
+| 4 — bulk-disable shared voucher | Manual "generate disable command"          | Same endpoint as #3 — one click in the dashboard                                                                               |
+| 5 — one-step voucher creation   | `disabled=no` in the pasted command        | Same, but also now checks PIN uniqueness against the database before creating (audit finding #3 fix)                           |
+| Plan pricing desync (audit #2)  | Hardcoded separately in `login.html`       | `plans` table is the only source of truth; `GET /api/plans/export.js` regenerates `plan-data.js` for the router's static pages |
 
 ## Architecture
 
@@ -35,21 +35,25 @@ MikroTik router  ──(scheduler, /tool fetch, every 30s)──►  POST /api/u
 ```
 
 Two paths feed usage data into the backend:
+
 1. **Router push** (`router-scripts/push-usage-webhook.rsc`) — primary, near-real-time, dashboard-freshness only.
 2. **Manual poll** (`POST /api/usage/poll`, "Poll router now" button) — on-demand fallback, reads `/ip/hotspot/active/print` directly.
 
-**Actual data-cap enforcement never depends on either of these** — it's native `limit-bytes-total` on the RouterOS user, enforced per-packet by the router itself. The webhook/poll paths only exist to keep the *dashboard* current and to trigger a backup disable call if something's usage sneaks past due to an edge case.
+**Actual data-cap enforcement never depends on either of these** — it's native `limit-bytes-total` on the RouterOS user, enforced per-packet by the router itself. The webhook/poll paths only exist to keep the _dashboard_ current and to trigger a backup disable call if something's usage sneaks past due to an edge case.
 
 ## Local setup
 
 ### 1. Database
+
 ```bash
 createdb mopdatec
 psql mopdatec -f database/schema.sql
 ```
+
 Or point `DATABASE_URL` at a hosted Postgres (e.g. Render) and skip the local `createdb`.
 
 ### 2. Backend
+
 ```bash
 cp .env.example .env   # fill in DATABASE_URL, ROUTEROS_*, JWT_SECRET, etc.
 npm install
@@ -57,13 +61,17 @@ npm run dev             # http://localhost:4000
 ```
 
 ### 3. Frontend
+
 See the `mopdatec-frontend` repo — it needs `VITE_API_URL` pointed at wherever this backend is running.
 
 ### 4. Router
+
 On the MikroTik router, over WinBox New Terminal:
+
 ```
 /import file-name=push-usage-webhook.rsc
 ```
+
 Edit `$webhookUrl` and `$secret` inside that script first (must match your backend's deployed URL and `WEBHOOK_SHARED_SECRET`).
 
 The original static-portal project referenced five other one-time setup
@@ -97,14 +105,17 @@ written script, since it depends on that system's exact existing data):
   (nothing pre-existing to migrate).
 
 Also make sure the RouterOS **API service** is enabled (it's off by default on some configs):
+
 ```
 /ip service enable api
 ```
+
 For anything reachable over the public internet, use `api-ssl` (port 8729) instead and set `ROUTEROS_TLS=true` in `.env`, not the plaintext `api` service.
 
 ## Deployment
 
 ### Backend → VPS + WireGuard (recommended — see deploy/DEPLOY.md)
+
 Full step-by-step runbook in [`deploy/DEPLOY.md`](deploy/DEPLOY.md): a
 plain Ubuntu VPS (systemd + Caddy for automatic HTTPS) running the backend,
 connected to the router over a WireGuard tunnel
@@ -112,6 +123,7 @@ connected to the router over a WireGuard tunnel
 port-forward. Postgres stays on a separate managed host (Render/Neon/
 Supabase) — the VPS only runs the Node process. Chosen over a plain
 PaaS (Render/etc.) specifically because:
+
 - A VPS has a static IP by default, so the router's firewall can allow
   exactly one address instead of the whole internet — most PaaS platforms'
   standard tiers don't give you a static outbound IP without a paid add-on.
@@ -121,8 +133,10 @@ PaaS (Render/etc.) specifically because:
   outbound) — a plain port-forward silently doesn't work in that case.
 
 ### Backend + Postgres → Render (simpler, if router exposure is acceptable)
+
 Still valid if you'd rather not run your own VPS and are OK with the
 router-exposure trade-off documented below.
+
 1. Create a **Postgres** instance on Render, copy its connection string into `DATABASE_URL`.
 2. Create a **Web Service** from this repository.
    - Build command: `npm install && npm run build`
@@ -135,6 +149,7 @@ router-exposure trade-off documented below.
 4. Your router must be able to reach this Render URL over the internet for `push-usage-webhook.rsc` to work — Render's default URL (`https://your-app.onrender.com`) is publicly reachable, so this works out of the box as long as your router has outbound internet access, which it already needs for normal operation.
 
 ### Router reachability note
+
 This backend needs a direct network path to the router's RouterOS API port (8728/8729) — this only works if the router has a public IP/reachable port-forward, or you run the backend on a network that can reach the router directly (e.g. same LAN, VPN, or a small VPS at the same site as the router). Render is a fully public-internet host with no static outbound IP on standard tiers, so a Render deployment means either opening that port to the whole internet (protected only by RouterOS credentials + `api-ssl` TLS — use a strong, unique `ROUTEROS_PASSWORD` if you go this route) or paying for Render's static-IP add-on so you can scope the firewall rule to just that address. The VPS + WireGuard path above avoids this trade-off entirely.
 
 Set `CORS_ORIGIN` to your deployed frontend's URL (comma-separate if you keep a preview URL too).
@@ -168,6 +183,7 @@ This is the same external-hosting pattern the competitor's system used (the
 video) — RouterOS supports it natively via the walled garden, it isn't a hack.
 
 **What this fixes that the static version couldn't:**
+
 - Plan pricing/labels on the login page now come from the same `plans` table
   that vouchers are actually created against — permanently closes audit
   finding #2 (previously only `bytesLimit`/`durationDays` were synced via
@@ -178,6 +194,7 @@ video) — RouterOS supports it natively via the walled garden, it isn't a hack.
   `$(bytes-out)` counters, which reset on every reconnect/idle-timeout.
 
 **Required setup step:**
+
 1. In each file under `router-scripts/hotspot-stubs/`, replace
    `YOUR-FRONTEND.vercel.app` with your actual deployed frontend domain, then
    upload them to the router's `/hotspot/` directory (WinBox → Files),
@@ -192,7 +209,7 @@ video) — RouterOS supports it natively via the walled garden, it isn't a hack.
 
 The actual RouterOS **authentication** (username/password check,
 `limit-bytes-total` enforcement) is completely unchanged by any of this —
-only what the customer *sees* moved off the router.
+only what the customer _sees_ moved off the router.
 
 ## Self-service voucher purchase (Paystack)
 
@@ -218,14 +235,18 @@ has landed, then shows the voucher PIN.
 ```
 
 **Setup:**
+
 1. Get your secret + public keys from
    [dashboard.paystack.co/#/settings/developer](https://dashboard.paystack.co/#/settings/developer)
    and set `PAYSTACK_SECRET_KEY` / `PAYSTACK_PUBLIC_KEY` in `.env`.
    Leaving these blank disables the feature cleanly — `POST
-   /api/payments/initialize` returns a clear error, nothing else breaks.
+/api/payments/initialize` returns a clear error, nothing else breaks.
 2. In that same dashboard page, register
    `https://<your-backend>/api/payments/webhook` as the webhook URL.
-3. Only plans with `price_kobo > 0` are offered for sale — the frontend's
+3. Set `PAYSTACK_CALLBACK_URL` to the deployed frontend's full
+   `/portal/buy/complete` URL. This avoids redirects to a local or proxy
+   origin when the initialize request has no browser `Origin` header.
+4. Only plans with `price_kobo > 0` are offered for sale — the frontend's
    `PortalBuy.tsx` filters on that.
 
 **Important constraint — this is a self-data page, not a walled-garden one:**
@@ -253,7 +274,7 @@ passwords, not a single shared username/password pair. Flow:
   that — those two env vars are never read again.
 - Any signed-in admin can add another from the dashboard's **Manage Staff**
   screen (`/staff` in the frontend repo), which calls `GET`/`POST
-  /api/admins` (`routes/admins.ts`, behind the same `requireAdmin` JWT check
+/api/admins` (`routes/admins.ts`, behind the same `requireAdmin` JWT check
   as the rest of the dashboard). There's no separate "super admin" role yet
   — every account has equal access.
 
@@ -284,13 +305,13 @@ the dashboard instead of via a customer complaint:
 - **Router health badge** — `routerHealthService.ts` polls `testConnection()`
   every 20s and broadcasts the result over the same socket the dashboard
   already holds open for live usage (`router:health` event). `GET
-  /api/health` answers from that cache instead of testing live, so it stays
+/api/health` answers from that cache instead of testing live, so it stays
   cheap even while the router's down. The frontend's `useRouterHealth.ts` +
   `RouterHealthBadge.tsx` render it green/red in the dashboard header.
 - **Unsynced-voucher alerts** — the frontend's `CreateVoucherForm` fires a
   toast immediately when a just-created voucher's `router_synced` comes
   back `false` from `POST /api/vouchers`. Its dashboard also shows a
-  persistent amber banner listing *every* currently-enabled voucher with
+  persistent amber banner listing _every_ currently-enabled voucher with
   `router_synced=false`, not just ones from the latest batch — catches a
   failure that happened earlier and was never retried. There's no one-click
   "retry sync" endpoint yet; today the fix is to disable and recreate the
@@ -354,7 +375,7 @@ new to return yet.
 `services/loginThrottle.ts` locks out a username for 15 minutes after 5
 failed `POST /api/auth/login` attempts within a 15-minute window — in-memory,
 per-username (not per-IP, to avoid one shared office network's mistyped
-password locking out everyone behind that IP). Checked *before* the
+password locking out everyone behind that IP). Checked _before_ the
 password is even compared, so a locked-out username gets the same `429`
 regardless of whether the password would've been right. Resets on a
 successful login, or naturally after the lockout window passes. Like the
@@ -384,7 +405,7 @@ shared single password never needed have answers now:
   (`adminService.revokeSessions()`) sets it to `now()`, instantly
   invalidating every token issued for that admin so far — the fix for a
   lost staff laptop or someone being let go, instead of waiting out the
-  normal 12h JWT expiry. That admin's *next* login still works fine (a
+  normal 12h JWT expiry. That admin's _next_ login still works fine (a
   fresh token has a later `iat`). Costs one extra indexed lookup per
   authenticated request; fails closed (503, not silently-allowed) if that
   lookup itself errors.
