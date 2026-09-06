@@ -170,6 +170,28 @@ export async function logoutVoucherEverywhere(
   });
 }
 
+/** Removes only this client's previous session, preserving shared-PIN users. */
+export async function logoutVoucherSession(
+  pin: string,
+  clientIp: string,
+  clientMac: string,
+): Promise<{ sessionsRemoved: number }> {
+  return withConnection(async (api) => {
+    const active = await api.write("/ip/hotspot/active/print", [
+      `?user=${pin}`,
+    ]);
+    const matching = (active as any[]).filter((session) =>
+      clientMac
+        ? session["mac-address"]?.toUpperCase() === clientMac.toUpperCase()
+        : session.address === clientIp,
+    );
+    for (const session of matching) {
+      await api.write("/ip/hotspot/active/remove", [`=.id=${session[".id"]}`]);
+    }
+    return { sessionsRemoved: matching.length };
+  });
+}
+
 /**
  * Real removal, not disable — used only for vouchers voucherService.deleteVoucher
  * has already confirmed have no usage/payment history, so there's nothing

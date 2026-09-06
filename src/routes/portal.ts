@@ -4,7 +4,10 @@ import {
   refreshVoucherUsage,
   markRedeemed,
 } from "../services/usageService";
-import { logoutVoucherEverywhere } from "../routeros/client";
+import {
+  logoutVoucherEverywhere,
+  logoutVoucherSession,
+} from "../routeros/client";
 
 export const portalRouter = Router();
 
@@ -41,6 +44,33 @@ portalRouter.post("/logout-all/:pin", async (req, res) => {
     res
       .status(503)
       .json({ error: "Could not disconnect the voucher sessions right now" });
+  }
+});
+
+// Removes only the previous session belonging to this client IP/MAC. Other
+// devices using a shared voucher remain connected.
+portalRouter.post("/logout-session/:pin", async (req, res) => {
+  const ip = typeof req.body?.ip === "string" ? req.body.ip.trim() : "";
+  const mac = typeof req.body?.mac === "string" ? req.body.mac.trim() : "";
+  if (!ip && !mac) {
+    return res.status(400).json({ error: "Client identity is required" });
+  }
+
+  try {
+    const result = await logoutVoucherSession(
+      req.params.pin.toUpperCase(),
+      ip,
+      mac,
+    );
+    res.json(result);
+  } catch (err: any) {
+    console.error(
+      "[portal] failed to disconnect the previous client session:",
+      err?.message || err,
+    );
+    res
+      .status(503)
+      .json({ error: "Could not clear the previous session right now" });
   }
 });
 
