@@ -64,6 +64,16 @@ CREATE TABLE IF NOT EXISTS vouchers (
                                            -- NOT rounded to a calendar date (see voucherService.expiryTimestamp)
   redeemed_at  TIMESTAMPTZ,               -- first successful login, NULL until then
   router_synced BOOLEAN NOT NULL DEFAULT false, -- true once the RouterOS API create call succeeded
+  -- Set when an admin archives a spent/expired voucher to get it out of the
+  -- working list (see voucherService.archiveVoucher). NOT the same as
+  -- `disabled`: disabling is an enforcement action on a live voucher;
+  -- archiving is bookkeeping — the row and all its usage_snapshots/payments
+  -- history are kept for accounting, it's just hidden from the default
+  -- voucher list and every Overview count. Reversible via unarchiveVoucher,
+  -- which re-creates the RouterOS user archiving removed. This is what makes
+  -- "delete" unnecessary for vouchers that have real history and therefore
+  -- can't be deleted (see deleteVoucher's VoucherHasHistoryError).
+  archived_at  TIMESTAMPTZ,
   -- Lifetime usage tracking — see the "bank on session change" comment on
   -- usageService.ingestUsageEvent(). RouterOS's own bytes-in/bytes-out on an
   -- active session are SESSION-scoped and reset to 0 every time that session
@@ -107,6 +117,12 @@ ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS usage_banked_bytes BIGINT NOT NULL
 ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS usage_current_session_id TEXT;
 ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS usage_current_session_bytes BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS usage_last_recorded_at TIMESTAMPTZ;
+
+-- Idempotent companion for the archive column above (installs that predate it).
+ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+-- Partial index: every list query and every Overview count now filters
+-- `archived_at IS NULL`, and archived rows are the permanent minority.
+CREATE INDEX IF NOT EXISTS idx_vouchers_active ON vouchers(created_at DESC) WHERE archived_at IS NULL;
 
 -- One row per usage push/poll per active session. Keyed by session_id (RouterOS's
 -- internal .id for the active-session entry), NOT by IP — IPs get recycled by

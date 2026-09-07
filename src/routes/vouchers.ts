@@ -1,15 +1,28 @@
 import { Router } from "express";
 import { z } from "zod";
 import { requireAdmin, AuthedRequest } from "../middleware/auth";
-import { createVoucherBatch, listVouchers, disableVoucher, deleteVoucher, VoucherHasHistoryError } from "../services/voucherService";
+import {
+  createVoucherBatch,
+  listVouchers,
+  disableVoucher,
+  deleteVoucher,
+  archiveVoucherBatch,
+  unarchiveVoucher,
+  VoucherHasHistoryError,
+  VoucherNotFoundError,
+} from "../services/voucherService";
 import { logAction } from "../services/auditService";
 
 const listQuerySchema = z.object({
   search: z.string().trim().min(1).optional(),
   planKey: z.string().min(1).optional(),
-  status: z.enum(["active", "not_synced", "expired", "disabled"]).optional(),
+  status: z.enum(["active", "not_synced", "expired", "disabled", "archived"]).optional(),
   sort: z.enum(["asc", "desc"]).optional(),
   limit: z.coerce.number().int().min(1).max(1000).optional(),
+});
+
+const archiveSchema = z.object({
+  pins: z.array(z.string().min(1)).min(1).max(500),
 });
 
 export const vouchersRouter = Router();
@@ -64,6 +77,39 @@ vouchersRouter.post("/:pin/disable", async (req: AuthedRequest, res) => {
     await logAction(req.admin!.username, "voucher_disabled", { pin: req.params.pin, ...result });
     res.json({ pin: req.params.pin, ...result });
   } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk-archive: hides spent/expired vouchers from the working list and
+// clears their router-side hotspot user, without touching any history —
+// the way to tidy up vouchers that deleteVoucher refuses because they've
+// been used or paid for. One audit entry for the whole batch, like
+// voucher_batch_created.
+vouchersRouter.post("/archive", async (req: AuthedRequest, res) => {
+  const parsed = archiveSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+  const results = await archiveVoucherBatch(parsed.data.pins);
+  await logAction(req.admin!.username, "voucher_batch_archived", {
+    pins: parsed.data.pins,
+    archived: results.filter((r) => r.archived).length,
+  });
+  res.json({ results });
+});
+
+// Reverses an archive — clears archived_at and re-creates the RouterOS
+// user (unless the voucher has since expired). 404 if the PIN is unknown.
+vouchersRouter.post("/:pin/unarchive", async (req: AuthedRequest, res) => {
+  try {
+    const result = await unarchiveVoucher(req.params.pin);
+    await logAction(req.admin!.username, "voucher_unarchived", { ...result });
+    res.json(result);
+  } catch (err: any) {
+    if (err instanceof VoucherNotFoundError) {
+      return res.status(404).json({ error: err.message });
+    }
     res.status(500).json({ error: err.message });
   }
 });

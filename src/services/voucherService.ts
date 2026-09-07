@@ -1,6 +1,10 @@
 import { pool } from "../db/pool";
 import { getPlan } from "./planService";
-import { createHotspotUser, disableVoucherEverywhere, deleteHotspotUserEverywhere } from "../routeros/client";
+import {
+  createHotspotUser,
+  disableVoucherEverywhere,
+  deleteHotspotUserEverywhere,
+} from "../routeros/client";
 
 // Excludes visually-ambiguous characters (0/O, 1/I/L) — same charset choice
 // as the original admin.html generator, kept for printed-voucher legibility.
@@ -102,7 +106,12 @@ export async function createVoucherBatch(planKey: string, qty: number): Promise<
   return results;
 }
 
-export type VoucherStatus = "active" | "not_synced" | "expired" | "disabled";
+export type VoucherStatus =
+  | "active"
+  | "not_synced"
+  | "expired"
+  | "disabled"
+  | "archived";
 
 export interface VoucherWithPlan {
   pin: string;
@@ -137,6 +146,12 @@ export interface ListVouchersOptions {
  * The outer WHERE against an aliased subquery (rather than repeating the
  * CASE expression) is just so `status` filtering can reference the
  * computed column instead of duplicating the expiry logic a second time.
+ *
+ * Archived vouchers are hidden by default — they only come back when the
+ * caller explicitly asks for `status: "archived"`. That's the whole point
+ * of archiving: get a spent voucher out of the working list without
+ * deleting its history. Every other status filter, and the no-filter case,
+ * excludes them.
  */
 export async function listVouchers(opts: ListVouchersOptions = {}): Promise<VoucherWithPlan[]> {
   const { search, planKey, status, sort = "desc", limit = 200 } = opts;
@@ -147,6 +162,7 @@ export async function listVouchers(opts: ListVouchersOptions = {}): Promise<Vouc
        SELECT v.pin, v.plan_key, p.label AS plan_label, v.disabled, v.created_at,
               v.expires_at, v.redeemed_at, v.router_synced,
               CASE
+                WHEN v.archived_at IS NOT NULL THEN 'archived'
                 WHEN v.disabled THEN 'disabled'
                 WHEN v.expires_at <= now() THEN 'expired'
                 WHEN NOT v.router_synced THEN 'not_synced'
@@ -157,6 +173,7 @@ export async function listVouchers(opts: ListVouchersOptions = {}): Promise<Vouc
      WHERE ($1::text IS NULL OR sub.pin ILIKE '%' || $1 || '%')
        AND ($2::text IS NULL OR sub.plan_key = $2)
        AND ($3::text IS NULL OR sub.status = $3)
+       AND (sub.status <> 'archived' OR $3::text = 'archived')
      ORDER BY sub.created_at ${sortSql}
      LIMIT $4`,
     [search || null, planKey || null, status || null, Math.min(limit, 1000)],
@@ -179,6 +196,125 @@ export async function disableVoucher(pin: string): Promise<{ sessionsRemoved: nu
   const result = await disableVoucherEverywhere(pin);
   await pool.query("UPDATE vouchers SET disabled = true WHERE pin = $1", [pin]);
   return result;
+}
+
+export class VoucherNotFoundError extends Error {
+  constructor(pin: string) {
+    super(`Voucher ${pin} not found`);
+    this.name = "VoucherNotFoundError";
+  }
+}
+
+export interface ArchiveResult {
+  pin: string;
+  archived: boolean;
+  /** Set when the DB was archived but clearing the router-side user failed —
+   *  the voucher is still hidden from the list, but its hotspot user may
+   *  linger on the router until the next archive attempt or a manual clean. */
+  routerError?: string;
+}
+
+/**
+ * Archives a voucher: removes its RouterOS hotspot user (kicking any active
+ * session first, same as a delete would) and stamps `archived_at` so it
+ * drops out of the default voucher list and every Overview count. The DB
+ * row — and all its usage_snapshots / payments history — is untouched.
+ *
+ * This is the answer to "I can't delete this spent voucher because it has
+ * history": archiving needs no such restriction, because nothing is
+ * destroyed. Reverse it with unarchiveVoucher().
+ *
+ * The router call is best-effort — same fault-tolerance rationale as
+ * createVoucherBatch. If the router is unreachable the voucher is still
+ * archived (it's leaving the working list either way); the caller gets a
+ * `routerError` back so the dashboard can warn that the hotspot user
+ * wasn't cleared. In practice the common case — archiving an
+ * already-disabled or already-expired voucher — means that user was
+ * disabled on the router anyway, so a lingering entry can't be logged into.
+ */
+export async function archiveVoucher(pin: string): Promise<ArchiveResult> {
+  const { rowCount } = await pool.query(
+    "SELECT 1 FROM vouchers WHERE pin = $1",
+    [pin],
+  );
+  if (!rowCount) throw new VoucherNotFoundError(pin);
+
+  let routerError: string | undefined;
+  try {
+    await deleteHotspotUserEverywhere(pin);
+  } catch (err: any) {
+    routerError = err?.message || "unknown RouterOS API error";
+    console.error(`[voucherService] router clear failed archiving ${pin}:`, routerError);
+  }
+
+  await pool.query(
+    "UPDATE vouchers SET archived_at = now() WHERE pin = $1 AND archived_at IS NULL",
+    [pin],
+  );
+  return { pin, archived: true, routerError };
+}
+
+/** Archives many vouchers, tolerating individual failures like createVoucherBatch. */
+export async function archiveVoucherBatch(pins: string[]): Promise<ArchiveResult[]> {
+  const results: ArchiveResult[] = [];
+  for (const pin of pins) {
+    try {
+      results.push(await archiveVoucher(pin));
+    } catch (err: any) {
+      results.push({ pin, archived: false, routerError: err?.message || "archive failed" });
+    }
+  }
+  return results;
+}
+
+/**
+ * Reverses archiveVoucher: clears `archived_at` and — unless the voucher is
+ * already past its expiry — re-creates the RouterOS hotspot user that
+ * archiving removed, mirroring createVoucherBatch's own create-and-enable
+ * call. `router_synced` is set from whether that call succeeded, so an
+ * unarchive done while the router is unreachable surfaces in the same
+ * "never synced" banner a failed creation would.
+ */
+export async function unarchiveVoucher(pin: string): Promise<{ pin: string; routerSynced: boolean; routerError?: string }> {
+  const { rows } = await pool.query<{ plan_key: string; expires_at: string; archived_at: string | null }>(
+    "SELECT plan_key, expires_at, archived_at FROM vouchers WHERE pin = $1",
+    [pin],
+  );
+  if (!rows.length) throw new VoucherNotFoundError(pin);
+  const voucher = rows[0];
+
+  // Idempotent: nothing to do (and re-running the router create below would
+  // fail on an already-existing hotspot user) if it isn't actually archived.
+  if (!voucher.archived_at) {
+    return { pin, routerSynced: true };
+  }
+
+  const expired = new Date(voucher.expires_at).getTime() <= Date.now();
+  let routerSynced = false;
+  let routerError: string | undefined;
+
+  if (!expired) {
+    const plan = await getPlan(voucher.plan_key);
+    if (!plan) throw new Error(`Unknown plan key: ${voucher.plan_key}`);
+    try {
+      await createHotspotUser({
+        pin,
+        profile: plan.profile,
+        bytesLimit: plan.bytesLimit,
+        expiresAt: voucher.expires_at,
+      });
+      routerSynced = true;
+    } catch (err: any) {
+      routerError = err?.message || "unknown RouterOS API error";
+      console.error(`[voucherService] router re-create failed unarchiving ${pin}:`, routerError);
+    }
+  }
+
+  await pool.query(
+    "UPDATE vouchers SET archived_at = NULL, router_synced = $2 WHERE pin = $1",
+    [pin, routerSynced],
+  );
+  return { pin, routerSynced, routerError };
 }
 
 export class VoucherHasHistoryError extends Error {

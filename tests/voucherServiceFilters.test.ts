@@ -7,7 +7,13 @@ import { listVouchers } from "../src/services/voucherService";
 // router call createVoucherBatch would make) so the SQL status/filter
 // logic in voucherService.listVouchers can be asserted without depending
 // on RouterOS being reachable.
-const TEST_PINS = ["TEST-VL-ACTIVE", "TEST-VL-EXPIRED", "TEST-VL-DISABLED", "TEST-VL-NOTSYNC"];
+const TEST_PINS = [
+  "TEST-VL-ACTIVE",
+  "TEST-VL-EXPIRED",
+  "TEST-VL-DISABLED",
+  "TEST-VL-NOTSYNC",
+  "TEST-VL-ARCHIVED",
+];
 
 async function cleanup() {
   await pool.query("DELETE FROM vouchers WHERE pin = ANY($1)", [TEST_PINS]);
@@ -16,11 +22,12 @@ async function cleanup() {
 beforeAll(async () => {
   await cleanup();
   await pool.query(
-    `INSERT INTO vouchers (pin, plan_key, expires_at, disabled, router_synced) VALUES
-       ('TEST-VL-ACTIVE',   'LS', ((now() AT TIME ZONE 'utc')::date + 5), false, true),
-       ('TEST-VL-EXPIRED',  'LS', ((now() AT TIME ZONE 'utc')::date - 2), false, true),
-       ('TEST-VL-DISABLED', 'LS', ((now() AT TIME ZONE 'utc')::date + 5), true,  true),
-       ('TEST-VL-NOTSYNC',  'LS', ((now() AT TIME ZONE 'utc')::date + 5), false, false)`,
+    `INSERT INTO vouchers (pin, plan_key, expires_at, disabled, router_synced, archived_at) VALUES
+       ('TEST-VL-ACTIVE',   'LS', ((now() AT TIME ZONE 'utc')::date + 5), false, true,  NULL),
+       ('TEST-VL-EXPIRED',  'LS', ((now() AT TIME ZONE 'utc')::date - 2), false, true,  NULL),
+       ('TEST-VL-DISABLED', 'LS', ((now() AT TIME ZONE 'utc')::date + 5), true,  true,  NULL),
+       ('TEST-VL-NOTSYNC',  'LS', ((now() AT TIME ZONE 'utc')::date + 5), false, false, NULL),
+       ('TEST-VL-ARCHIVED', 'LS', ((now() AT TIME ZONE 'utc')::date + 5), true,  true,  now())`,
   );
 });
 
@@ -40,9 +47,26 @@ describe("voucherService.listVouchers", () => {
     expect(byPin["TEST-VL-NOTSYNC"]).toBe("not_synced");
   });
 
+  it("hides archived vouchers by default", async () => {
+    const pins = (await listVouchers({ search: "TEST-VL-" })).map((v) => v.pin);
+    expect(pins).not.toContain("TEST-VL-ARCHIVED");
+  });
+
+  it("returns archived vouchers only when explicitly filtered", async () => {
+    const vouchers = await listVouchers({ search: "TEST-VL-", status: "archived" });
+    expect(vouchers.map((v) => v.pin)).toEqual(["TEST-VL-ARCHIVED"]);
+    expect(vouchers[0].status).toBe("archived");
+  });
+
   it("filters by status", async () => {
     const vouchers = await listVouchers({ search: "TEST-VL-", status: "expired" });
     expect(vouchers.map((v) => v.pin)).toEqual(["TEST-VL-EXPIRED"]);
+  });
+
+  it("excludes archived from a non-archived status filter", async () => {
+    // TEST-VL-ARCHIVED is also disabled=true, but archiving wins.
+    const vouchers = await listVouchers({ search: "TEST-VL-", status: "disabled" });
+    expect(vouchers.map((v) => v.pin)).toEqual(["TEST-VL-DISABLED"]);
   });
 
   it("filters by search substring, case-insensitively", async () => {

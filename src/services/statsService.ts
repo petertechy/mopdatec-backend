@@ -26,6 +26,8 @@ export async function getOverviewStats(): Promise<OverviewStats> {
   const [statusCounts, createdToday, activeSessions, revenue] = await Promise.all([
     // Same CASE expression as voucherService.listVouchers — kept in sync
     // by hand since it's the one other place this status logic exists.
+    // Archived vouchers are excluded here too, so these counts match what
+    // the (archived-hiding) voucher list shows.
     pool.query<{ status: string; count: string }>(
       `SELECT status, count(*)::text FROM (
          SELECT CASE
@@ -35,10 +37,11 @@ export async function getOverviewStats(): Promise<OverviewStats> {
            ELSE 'active'
          END AS status
          FROM vouchers
+         WHERE archived_at IS NULL
        ) sub GROUP BY status`,
     ),
     pool.query<{ count: string }>(
-      `SELECT count(*)::text FROM vouchers WHERE created_at >= date_trunc('day', now())`,
+      `SELECT count(*)::text FROM vouchers WHERE archived_at IS NULL AND created_at >= date_trunc('day', now())`,
     ),
     pool.query<{ count: string }>(
       `SELECT count(*)::text FROM latest_usage WHERE recorded_at > now() - interval '10 minutes'`,
