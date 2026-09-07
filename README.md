@@ -154,54 +154,62 @@ This backend needs a direct network path to the router's RouterOS API port (8728
 
 Set `CORS_ORIGIN` to your deployed frontend's URL (comma-separate if you keep a preview URL too).
 
-## The customer-facing captive portal is now dynamic too
+## The customer-facing captive portal — split model
 
-`login.html`, `status.html`, `logout.html`, and `error.html` are no longer
-static files on the router with hardcoded plan data. They're now **thin
-redirect stubs** (`router-scripts/hotspot-stubs/*.html`) that forward
-RouterOS's own template variables (`$(link-login-only)`, `$(error)`, etc.) as
-URL params to real, dynamic pages in the frontend repo
-(`frontend/src/pages/portal/*.tsx` there), reached at `/portal/login`,
-`/portal/status`, `/portal/logout`, `/portal/error`.
+**Login and logout are router-served HTML** (`router-scripts/hotspot-stubs/
+login.html`, `logout.html`, `error.html`, plus `plan-data.js`). The login
+form POSTs the voucher PIN straight to RouterOS's own `$(link-login-only)` —
+no backend call, no external domain, no framework in the auth path. If
+Postgres, the VPS, the WireGuard tunnel, or Vercel are all down, a customer
+can still get online. This is the same model the pre-fullstack portal used;
+an intermediate version routed login through the Vercel SPA and a backend
+"clear previous session" call, which made logging in fail whenever any of
+that was slow or unreachable — reverted.
 
 ```
 Client's phone
-   │  auto-popup → router serves login.html (tiny stub)
+   │  auto-popup → router serves login.html (full page, fresh $(link-login-only))
    ▼
-Router's login.html
-   │  window.location.replace(...) with RouterOS vars as query params
+User enters PIN, taps Connect
+   │  native form POST  username=PIN&password=PIN → $(link-login-only)
    ▼
-https://your-frontend.vercel.app/portal/login?linkLoginOnly=...&error=...
-   │  fetches GET /api/plans (live from Postgres) — renders real-time pricing
-   │  user submits — form POSTs directly to $(link-login-only) on the router
-   ▼
-Router completes auth (PAP, same as before) → redirects to $(link-orig)
+Router completes auth (PAP, same as always) → redirects to $(link-orig)
 ```
 
-This is the same external-hosting pattern the competitor's system used (the
-`yuslamuniquetechandcomputerserviceslimited...` domain from the reference
-video) — RouterOS supports it natively via the walled garden, it isn't a hack.
+**Status, buy, and recover are the Vercel SPA.** `status.html` is still a
+thin redirect stub → `/portal/status`, because that page's value is real:
+usage figures come from `usage_snapshots` (persists across reconnects)
+instead of RouterOS's session-scoped `$(bytes-in)`/`$(bytes-out)` counters
+that reset on every reconnect. `/portal/buy` and `/portal/recover` are
+reached by QR/link, not the captive flow.
 
-**What this fixes that the static version couldn't:**
+**Plan chips on the login page** come from `plan-data.js`, a router-hosted
+file. It's the DB's `plans` table exported to JS — regenerate and re-upload
+whenever pricing changes:
 
-- Plan pricing/labels on the login page now come from the same `plans` table
-  that vouchers are actually created against — permanently closes audit
-  finding #2 (previously only `bytesLimit`/`durationDays` were synced via
-  `plan-data.js`; price was hardcoded a third time, separately, in
-  `login.html`).
-- `status.html`'s usage figures now come from `usage_snapshots` (persists
-  across reconnects) instead of RouterOS's session-scoped `$(bytes-in)` /
-  `$(bytes-out)` counters, which reset on every reconnect/idle-timeout.
+```
+curl -H "Authorization: Bearer <admin-token>" \
+  https://api.<yourdomain>/api/plans/export.js > plan-data.js
+# then upload plan-data.js to the router's /hotspot/ directory
+```
 
-**Required setup step:**
+A checked-in copy under `hotspot-stubs/` mirrors the schema seed, and
+`login.html` has a hardcoded fallback, so the page still works if the file
+is missing.
 
-1. In each file under `router-scripts/hotspot-stubs/`, replace
-   `YOUR-FRONTEND.vercel.app` with your actual deployed frontend domain, then
-   upload them to the router's `/hotspot/` directory (WinBox → Files),
-   overwriting the originals.
-2. Run `router-scripts/allow-portal-domain.rsc` (after replacing the domain
-   inside it too) — without this, unauthenticated clients can't reach the
-   portal domain to load the redirect target at all.
+**Required setup:**
+
+1. Upload every file under `router-scripts/hotspot-stubs/` (including
+   `plan-data.js`) to the router's `/hotspot/` directory (WinBox → Files),
+   overwriting the originals. Replace the `mopdatecwifi.com` hostnames in
+   `login.html` (the Buy link) and `status.html` (the redirect target) with
+   your real domain first.
+2. Run `router-scripts/allow-portal-domain.rsc` (with your real domain) —
+   needed so unauthenticated clients can reach the SPA for the status page
+   and the "Buy Voucher Online" link. Login itself no longer depends on it.
+3. Run `router-scripts/create-hotspot-profiles.rsc` — sets `idle-timeout` /
+   `keepalive-timeout` so a device that leaves without logging out doesn't
+   hold its `shared-users` slot and block the next login.
 3. `alogin.html`, `rlogin.html`, `redirect.html`, `radvert.html` are left as
    local static files (still on the router, unchanged) — they're pure
    transitional spinners with no user-specific data to render, so there's no

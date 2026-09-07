@@ -1,12 +1,15 @@
 # MOPDATEC WI-FI — walled-garden rules for the externally-hosted portal
 #
-# REQUIRED once login.html/status.html/logout.html/error.html were switched
-# from local /hotspot/ files to redirect stubs pointing at an external
-# Vercel-hosted app (see router-scripts/hotspot-stubs/*.html and
-# frontend/src/pages/portal/*.tsx). Without these rules, unauthenticated
-# clients can't reach the portal domain at all, so the redirect itself would
-# fail — this is on top of, not instead of, the OS-captive-check domains
-# already allowed by verify-captive-portal.rsc (Issue 1).
+# REQUIRED for the parts of the portal that are the Vercel SPA: the status
+# page (status.html redirects there) and the "Buy Voucher Online" link on
+# login.html. Without these rules an unauthenticated client can't reach the
+# portal domain, so those fail silently. This is on top of, not instead of,
+# the OS-captive-check domains already allowed by verify-captive-portal.rsc.
+#
+# NOT needed for login/logout themselves — login.html, logout.html and
+# error.html are plain router-served HTML again (the form POSTs straight to
+# $(link-login-only)), so the critical auth path works even if this rule is
+# missing or the portal domain is unreachable.
 #
 # Both the frontend domain AND the API domain are needed here — the loaded
 # portal page's own JS calls the API directly (GET /api/plans, submitting

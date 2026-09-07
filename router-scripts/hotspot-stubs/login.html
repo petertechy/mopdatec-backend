@@ -1,30 +1,218 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<title>MOPDATEC WI-FI</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>MOPDATEC WI-FI - Login</title>
+<!--
+  Router-served login page. This is NOT a redirect stub — the form below
+  POSTs the voucher PIN straight to RouterOS's own $(link-login-only), the
+  exact same way the pre-fullstack portal did. No backend call, no external
+  domain, no framework: if Postgres, the VPS, the WireGuard tunnel or Vercel
+  are all down, a customer can still log in. The fullstack app still owns the
+  admin dashboard, the status page, and online voucher purchase — just not
+  the critical auth path.
+
+  Plan chip labels/prices come from plan-data.js, uploaded alongside this
+  file into the router's /hotspot/ directory. Regenerate it from the live
+  `plans` table any time pricing changes:  GET /api/plans/export.js  (admin
+  token required), then re-upload. A hardcoded fallback below keeps the page
+  working if that file is missing.
+-->
+<style>
+  :root{
+    --navy:#0a2540;--navy2:#123a5e;--cyan:#2fe0d0;--muted:#5b7089;
+    --danger:#e5484d;--border:#dce9f5;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+    color:#15202b;min-height:100vh;display:flex;flex-direction:column;
+    align-items:center;padding:24px 16px 40px;
+    background:radial-gradient(circle at 50% -10%,#f7fbff,#eaf4fc 70%),#f0f6fc;
+  }
+  .brand{font-size:22px;font-weight:900;color:var(--navy);margin-bottom:16px;text-align:center;letter-spacing:-0.5px;}
+  .brand span{color:var(--cyan);}
+  .card{
+    background:#fff;border:1px solid var(--border);border-radius:20px;
+    padding:24px 20px;width:100%;max-width:400px;
+    box-shadow:0 12px 36px rgba(10,37,64,.1);margin-bottom:16px;
+  }
+  .card-title{font-size:1.15rem;font-weight:800;color:var(--navy);text-align:center;margin-bottom:4px;}
+  .card-sub{font-size:.82rem;color:var(--muted);text-align:center;margin-bottom:18px;}
+  .error-box{
+    background:#fdecec;border:1px solid #f7c8c9;color:var(--danger);
+    padding:10px 14px;border-radius:12px;font-size:.82rem;font-weight:700;
+    margin-bottom:16px;text-align:center;
+  }
+  .input-label{display:block;font-size:.78rem;font-weight:800;color:var(--navy2);margin-bottom:6px;text-transform:uppercase;}
+  .pin-input{
+    width:100%;padding:14px;border-radius:12px;border:2px solid var(--border);
+    font-size:1.2rem;font-weight:800;font-family:monospace;letter-spacing:2px;
+    text-transform:uppercase;text-align:center;outline:none;background:#f9fcff;
+  }
+  .pin-input:focus{border-color:var(--cyan);background:#fff;box-shadow:0 0 0 4px rgba(47,224,208,.2);}
+  .detected-badge{
+    display:none;text-align:center;margin-top:8px;font-size:.78rem;font-weight:800;
+    color:#00a878;background:#eafbf9;padding:4px 10px;border-radius:20px;border:1px solid var(--cyan);
+  }
+  .btn-connect{
+    width:100%;margin-top:16px;padding:14px;background:linear-gradient(135deg,var(--navy),var(--navy2));
+    color:#fff;border:none;border-radius:12px;font-weight:800;font-size:15px;cursor:pointer;
+    box-shadow:0 6px 20px rgba(10,37,64,.2);
+  }
+  .btn-connect:active{transform:scale(0.98);}
+  .section-title{font-size:.82rem;font-weight:800;color:var(--muted);text-transform:uppercase;margin:20px 0 10px;text-align:center;}
+  .plans-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+  .plan-chip{background:#f4f9fd;border:1.5px solid #e0edf8;border-radius:12px;padding:10px 8px;text-align:center;cursor:pointer;}
+  .plan-chip.active{border-color:var(--cyan);background:#eafbf9;}
+  .p-name{font-size:.78rem;font-weight:800;color:var(--navy);}
+  .p-data{font-size:.92rem;font-weight:900;color:var(--navy2);margin:2px 0;}
+  .p-price{font-size:.74rem;font-weight:700;color:var(--muted);}
+  .buy-buttons{width:100%;max-width:400px;display:flex;flex-direction:column;gap:8px;}
+  .btn-buy{
+    display:flex;align-items:center;justify-content:center;gap:8px;background:#fff;
+    border:1.5px solid var(--border);color:var(--navy);font-weight:700;font-size:13px;
+    padding:11px 18px;border-radius:999px;text-decoration:none;
+  }
+  .btn-buy.primary{background:linear-gradient(135deg,var(--navy),var(--navy2));color:#fff;border:none;}
+  .hint{font-size:11px;color:var(--muted);text-align:center;max-width:340px;margin:10px auto 0;}
+  footer{margin-top:auto;padding-top:24px;font-size:11px;color:var(--muted);text-align:center;}
+</style>
 </head>
 <body>
+
+  <div class="brand">MOPDATEC <span>WI-FI</span></div>
+
+  <div class="card">
+    <div class="card-title">High-Speed Internet</div>
+    <div class="card-sub">Enter your voucher PIN to activate your session</div>
+
+    $(if error)
+      <div class="error-box">$(error)</div>
+    $(endif)
+
+    <form name="login" action="$(link-login-only)" method="post" onsubmit="return handleLogin();">
+      <input type="hidden" name="dst" value="$(link-orig-esc)" />
+      <input type="hidden" name="popup" value="true" />
+      <input type="hidden" name="username" id="real-username" value="" />
+      <input type="hidden" name="password" id="real-password" value="" />
+
+      <label class="input-label">Voucher PIN</label>
+      <input type="text" id="voucher-pin" class="pin-input" placeholder="e.g. PW-XXXXX"
+             autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false"
+             oninput="onPinChange(this.value)" autofocus required />
+
+      <div class="detected-badge" id="detected-badge">Detected: <b></b></div>
+
+      <button type="submit" class="btn-connect">Connect to Internet &#9889;</button>
+    </form>
+
+    <div class="section-title">Available Data Bundles</div>
+    <div class="plans-grid" id="plans-grid"></div>
+  </div>
+
+  <div class="buy-buttons">
+    <a href="https://mopdatecwifi.com/portal/buy" class="btn-buy primary">&#128179; Buy Voucher Online</a>
+    <a href="https://wa.me/2348146734552?text=Hi%2C%20I%20want%20to%20buy%20a%20MOPDATEC%20Wi-Fi%20Voucher" target="_blank" rel="noopener" class="btn-buy">
+      &#128172; Buy Voucher on WhatsApp
+    </a>
+    <a href="https://t.me/Mopdatecwirelessbot" target="_blank" rel="noopener" class="btn-buy">
+      &#129302; Buy on Telegram Bot
+    </a>
+  </div>
+
+  <p class="hint">
+    Login page didn't open automatically? Open any browser and visit any website &mdash; you'll be redirected here.
+  </p>
+
+  <footer>Powered by <b>LakesideTech</b></footer>
+
+  <script src="plan-data.js"></script>
   <script>
-    // RouterOS substitutes every $(...) below server-side before this page is
-    // ever sent to the browser — by the time this script runs, these are
-    // plain string literals, not live template syntax. $(link-orig-esc) and
-    // $(link-login-only) are already URL-safe per MikroTik's own escaping;
-    // $(error) is NOT pre-escaped, so it's encoded client-side below before
-    // being appended to the query string.
-    var params = new URLSearchParams({
-      linkLoginOnly: "$(link-login-only)",
-      linkOrig: "$(link-orig-esc)",
-      linkLogout: "$(link-logout)",
-      ip: "$(ip)",
-      mac: "$(mac)",
-      error: "$(error)"
-    });
-    // REPLACE with your deployed Vercel frontend URL.
-    window.location.replace("https://mopdatecwifi.com/portal/login?" + params.toString());
+    // Fallback if plan-data.js wasn't uploaded next to this file — same
+    // shape as backend/src/services/planService.ts -> exportPlanDataJs().
+    if (typeof MOPDATEC_PLANS === "undefined") {
+      window.MOPDATEC_PLANS = {
+        "LS": { prefix:"LS-", label:"Low Standard (3GB)", chipLabel:"Low Standard (3GB - 1 Day)", durationDays:1, priceNaira:500 },
+        "standard": { prefix:"ST-", label:"Standard (6.5GB)", chipLabel:"Standard (6.5GB - 1 Day)", durationDays:1, priceNaira:1000 },
+        "Trader Pass": { prefix:"TP-", label:"Trader Pass (18.5GB)", chipLabel:"Trader Pass (18.5GB - 3 Days)", durationDays:3, priceNaira:3000 },
+        "Pro Weekly": { prefix:"PW-", label:"Pro Weekly (70GB)", chipLabel:"Pro Weekly (70GB - 7 Days)", durationDays:7, priceNaira:5000 },
+        "Pro Monthly": { prefix:"PM-", label:"Pro Monthly (150GB)", chipLabel:"Pro Monthly (150GB - 30 Days)", durationDays:30, priceNaira:20000 },
+        "Premium": { prefix:"PR-", label:"Premium (Unlimited)", chipLabel:"Premium Unlimited (30 Days)", durationDays:30, priceNaira:40000 }
+      };
+    }
+
+    var PLANS = MOPDATEC_PLANS;
+
+    // Build the plan chips from whatever plan data we have.
+    (function renderChips() {
+      var grid = document.getElementById("plans-grid");
+      var html = "";
+      for (var key in PLANS) {
+        var p = PLANS[key];
+        var code = p.prefix.replace(/-$/, "");
+        var label = p.label || key;
+        var shortName = label.replace(/\s*\(.+\)/, "");
+        var gb = label.match(/([\d.]+\s*GB)/i);
+        var dataText = /unlimited/i.test(label) ? "Unlimited" : (gb ? gb[1] : "");
+        var days = p.durationDays === 1 ? "1 Day" : p.durationDays + " Days";
+        html += '<div class="plan-chip" id="chip-' + code + '" onclick="selectPrefix(\'' + p.prefix + '\')">'
+              + '<div class="p-name">' + shortName + '</div>'
+              + '<div class="p-data">' + dataText + '</div>'
+              + '<div class="p-price">&#8358;' + Number(p.priceNaira).toLocaleString() + ' &bull; ' + days + '</div>'
+              + '</div>';
+      }
+      grid.innerHTML = html;
+    })();
+
+    function clearActiveChips() {
+      var chips = document.querySelectorAll('.plan-chip');
+      for (var i = 0; i < chips.length; i++) chips[i].classList.remove('active');
+    }
+
+    function onPinChange(val) {
+      var pin = val.trim().toUpperCase();
+      document.getElementById('voucher-pin').value = pin;
+      clearActiveChips();
+
+      var badge = document.getElementById('detected-badge');
+      var matched = null, matchedCode = null;
+      for (var key in PLANS) {
+        var pfx = PLANS[key].prefix.toUpperCase();
+        if (pin.indexOf(pfx) === 0 || pin.indexOf(pfx.replace(/-$/, "")) === 0) {
+          matched = PLANS[key];
+          matchedCode = pfx.replace(/-$/, "");
+          break;
+        }
+      }
+      if (matched) {
+        var chip = document.getElementById('chip-' + matchedCode);
+        if (chip) chip.classList.add('active');
+        badge.style.display = "block";
+        badge.querySelector('b').textContent = matched.chipLabel || matched.label;
+      } else {
+        badge.style.display = "none";
+      }
+    }
+
+    function selectPrefix(pfx) {
+      var input = document.getElementById('voucher-pin');
+      if (input.value.indexOf(pfx) !== 0) input.value = pfx;
+      input.focus();
+      onPinChange(input.value);
+    }
+
+    // The voucher PIN is both username and password (single-credential
+    // model) — copy it into the hidden fields the router expects, exactly
+    // like the pre-fullstack login.html did, then let the native POST go.
+    function handleLogin() {
+      var pin = document.getElementById('voucher-pin').value.trim().toUpperCase();
+      if (!pin) return false;
+      document.getElementById('real-username').value = pin;
+      document.getElementById('real-password').value = pin;
+      return true;
+    }
   </script>
-  <noscript>
-    <p>JavaScript is required to sign in. Please enable it and reload this page.</p>
-  </noscript>
 </body>
 </html>

@@ -1,19 +1,41 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<title>MOPDATEC WI-FI</title>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MOPDATEC WI-FI - Logged Out</title>
+<!--
+  Router-served logout page. RouterOS serves this after it has already
+  processed the logout (session removed; the cookie is erased too when the
+  logout link carried ?erase-cookie=on — see status.html / PortalStatus).
+  Just a receipt + a way back to the login page. No redirect, no backend.
+-->
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{
+    font-family:'Segoe UI',system-ui,-apple-system,Arial,sans-serif;color:#0c1f36;
+    display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;
+    background:radial-gradient(circle at 50% -10%,#f7fbff,#eaf4fc 70%),#f0f6fc;
+  }
+  .card{background:#0c1f36;border-radius:18px;padding:28px;max-width:360px;width:100%;
+    box-shadow:0 14px 30px rgba(10,25,45,.35);text-align:center;}
+  h2{color:#fff;margin:6px 0 4px;font-size:20px;}
+  p.sub{color:#9db3c8;font-size:13px;margin:0 0 18px;}
+  .stat{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #1c3b57;color:#cfe0ee;font-size:13px;}
+  .stat b{color:#fff;}
+  a.again{display:block;margin-top:20px;padding:12px;border-radius:10px;
+    background:linear-gradient(180deg,#3ec9d6,#2ba9b6);color:#04222a;font-weight:800;
+    text-decoration:none;font-size:14px;}
+</style>
 </head>
 <body>
-  <script>
-    var params = new URLSearchParams({
-      linkLogin: "$(link-login)",
-      uptime: "$(uptime)",
-      bytesOutNice: "$(bytes-out-nice)",
-      bytesInNice: "$(bytes-in-nice)"
-    });
-    // REPLACE with your deployed Vercel frontend URL.
-    window.location.replace("https://mopdatecwifi.com/portal/logout?" + params.toString());
-  </script>
+  <div class="card">
+    <h2>You've been disconnected</h2>
+    <p class="sub">Your voucher usage is saved. Log in with the same PIN to continue.</p>
+    <div class="stat"><span>Session time</span><b>$(uptime)</b></div>
+    <div class="stat"><span>Data used (down)</span><b>$(bytes-out-nice)</b></div>
+    <div class="stat"><span>Data used (up)</span><b>$(bytes-in-nice)</b></div>
+    <a class="again" href="$(link-login)">Go to Login page</a>
+  </div>
 </body>
 </html>
