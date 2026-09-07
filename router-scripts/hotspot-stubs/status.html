@@ -8,7 +8,10 @@
   <script>
     var params = new URLSearchParams({
       username: "$(username)",
-      linkLogout: "$(link-logout)",
+      // erase-cookie=on: drop the RouterOS HTTP auth cookie on logout, so a
+      // stale cookie can't shadow the PIN form on the next visit once this
+      // voucher expires or hits its cap. (PortalStatus also enforces this.)
+      linkLogout: "$(link-logout)?erase-cookie=on",
       uptime: "$(uptime)",
       bytesOutNice: "$(bytes-out-nice)",
       bytesInNice: "$(bytes-in-nice)"
