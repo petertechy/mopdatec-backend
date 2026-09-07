@@ -275,7 +275,13 @@ sudo systemctl restart mopdatec-backend
 ```bash
 cd /opt/mopdatec-backend
 git pull
-npm install   # only if package.json changed
+npm install                 # only if package.json changed
 npm run build
+node dist/db/migrate.js      # only if database/schema.sql changed — idempotent, safe to always run
 sudo systemctl restart mopdatec-backend
 ```
+
+Run the migration *before* the restart so the schema is ready when the new
+code starts serving. `schema.sql` is written to be idempotent
+(`ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, …), so running
+`migrate.js` on every deploy is harmless if you'd rather not check.
