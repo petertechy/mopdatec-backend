@@ -8,18 +8,24 @@
 #
 # Sets, per profile:
 #   - shared-users        — concurrent devices allowed per voucher
-#   - idle-timeout        — how long RouterOS holds an `active` session open
-#                           after the device stops sending traffic
-#   - keepalive-timeout   — how long it holds one open after the device stops
-#                           answering ARP entirely
-#
-# The two timeouts matter: without them a device that leaves uncleanly (screen
-# sleep, out of range, Wi-Fi drop — no explicit logout) leaves a ghost session
-# that never gets reaped. On a shared-users=1 plan that one slot stays taken,
-# so the next login attempt gets "no more sessions are allowed" and the
-# customer can't get back on. These match the router's stock "default"
-# profile (5 min idle) — the earlier build of this script set them and a
-# later rewrite dropped them, which is what caused the re-login failures.
+#   - idle-timeout        — deliberately DISABLED (none). A device that's
+#                           still connected but just quiet for a few minutes
+#                           (screen locked, no active traffic) must NOT lose
+#                           its session over that alone — that was causing
+#                           customers to get kicked mid-visit for no reason
+#                           they could see. Ghost-session reaping for a
+#                           device that's actually gone is keepalive-timeout's
+#                           job instead (see below), not idle-timeout's.
+#   - keepalive-timeout   — how long RouterOS holds an `active` session open
+#                           after the device stops answering ARP entirely
+#                           (i.e. it's actually gone — out of range, Wi-Fi
+#                           off, powered down), not just quiet. Without this
+#                           a device that leaves uncleanly (no explicit
+#                           logout) would leave a ghost session that's never
+#                           reaped — on a shared-users=1 plan that one slot
+#                           stays taken, so the next login attempt gets
+#                           "no more sessions are allowed" and the customer
+#                           can't get back on.
 #
 # The data cap itself is set per-voucher at creation time via
 # `limit-bytes-total` (Issue 2's fix), NOT at the profile level. If your
@@ -28,7 +34,7 @@
 #
 # Run once over WinBox New Terminal: /import file-name=create-hotspot-profiles.rsc
 
-:local idle "00:05:00"
+:local idle "none"
 :local keepalive "00:02:00"
 
 :local profiles {

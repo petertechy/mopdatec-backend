@@ -87,6 +87,19 @@ written script, since it depends on that system's exact existing data):
   **required**, RouterOS rejects creating a hotspot user against a profile
   that doesn't exist. Written without live router access this session —
   verify it in a WinBox terminal before trusting it against real vouchers.
+- **`set-session-timeout.rsc`** — sets `http-cookie-lifetime=30d` (and
+  ensures `login-by` includes `cookie`) on the hotspot server profile.
+  This is the "stay logged in indefinitely" rule: a customer who
+  reconnects any time in the next 30 days is auto-logged back in via the
+  router's own auth cookie — no PIN re-entry, no login page. Doesn't
+  bypass real billing: RouterOS won't honor the cookie for a
+  disabled/expired hotspot user, and `expiryService.ts` /
+  `limit-bytes-total` are still what actually cut a voucher off on time.
+  Complementary to, not a replacement for,
+  `create-hotspot-profiles.rsc`'s `keepalive-timeout` — that frees up the
+  shared-users slot once a device has actually left (unavoidable;
+  RouterOS can't keep a session "active" for a radio that's off), this
+  just means coming back never requires re-entering the PIN.
 - **`verify-captive-portal.rsc`** — also rewritten, as a **diagnostic**
   rather than an auto-fix (no live router access to safely test a blind
   firewall/DNS mutation against). Checks for the three most common causes
@@ -207,9 +220,15 @@ is missing.
 2. Run `router-scripts/allow-portal-domain.rsc` (with your real domain) —
    needed so unauthenticated clients can reach the SPA for the status page
    and the "Buy Voucher Online" link. Login itself no longer depends on it.
-3. Run `router-scripts/create-hotspot-profiles.rsc` — sets `idle-timeout` /
-   `keepalive-timeout` so a device that leaves without logging out doesn't
-   hold its `shared-users` slot and block the next login.
+3. Run `router-scripts/create-hotspot-profiles.rsc` — sets `keepalive-timeout`
+   so a device that leaves without logging out doesn't hold its
+   `shared-users` slot and block the next login (`idle-timeout` is
+   deliberately left disabled, so a device that's just quiet for a few
+   minutes doesn't get logged out for that alone).
+3. Run `router-scripts/set-session-timeout.rsc` — sets `http-cookie-lifetime`
+   to 30 days so a customer who steps away and comes back is auto-reconnected
+   without re-entering their PIN, for as long as their voucher itself is
+   still valid.
 3. `alogin.html`, `rlogin.html`, `redirect.html`, `radvert.html` are left as
    local static files (still on the router, unchanged) — they're pure
    transitional spinners with no user-specific data to render, so there's no
