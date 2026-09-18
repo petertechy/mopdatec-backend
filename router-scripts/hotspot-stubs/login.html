@@ -145,6 +145,21 @@
 
     var PLANS = MOPDATEC_PLANS;
 
+    // Belt-and-suspenders for RouterOS's own MAC-keyed hotspot cookie
+    // (create-hotspot-profiles.rsc's mac-cookie-timeout / set-session-timeout.rsc's
+    // http-cookie-lifetime): those don't help a device that changes its MAC
+    // address on every reconnect, which iOS/macOS do by default for
+    // "Private Wi-Fi Address" on hotspot-type networks (Android/Windows
+    // reuse one MAC per saved network, so the router's own cookie already
+    // handles them — this rarely even fires there). Remembering the last
+    // PIN in THIS BROWSER's localStorage and auto-submitting it sidesteps
+    // MAC entirely. Deliberately does not call the backend to check the PIN
+    // is still valid first — RouterOS's own login response is already the
+    // validation (a bad PIN just re-shows this page with $(error) set,
+    // same as a manual failed attempt), so this stays dependency-free like
+    // the rest of the login path.
+    var LAST_PIN_KEY = "mopdatec_last_pin";
+
     // Build the plan chips from whatever plan data we have.
     (function renderChips() {
       var grid = document.getElementById("plans-grid");
@@ -211,8 +226,32 @@
       if (!pin) return false;
       document.getElementById('real-username').value = pin;
       document.getElementById('real-password').value = pin;
+      try { localStorage.setItem(LAST_PIN_KEY, pin); } catch (e) { /* private mode etc. — ignore */ }
       return true;
     }
+
+    // Runs once per page load, after the form/functions above exist.
+    (function autoReconnect() {
+      // This page is only re-shown WITH an error after a login attempt —
+      // manual or auto — actually failed (bad/expired/disabled PIN). Never
+      // auto-retry in that case, or a dead voucher would loop forever; just
+      // forget it and let the customer see the error like normal.
+      if (document.querySelector('.error-box')) {
+        try { localStorage.removeItem(LAST_PIN_KEY); } catch (e) {}
+        return;
+      }
+
+      var storedPin;
+      try { storedPin = localStorage.getItem(LAST_PIN_KEY); } catch (e) { return; }
+      if (!storedPin) return;
+
+      var input = document.getElementById('voucher-pin');
+      input.value = storedPin;
+      onPinChange(storedPin);
+      if (handleLogin()) {
+        document.login.submit();
+      }
+    })();
   </script>
 </body>
 </html>

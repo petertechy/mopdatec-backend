@@ -26,6 +26,25 @@
 #                           stays taken, so the next login attempt gets
 #                           "no more sessions are allowed" and the customer
 #                           can't get back on.
+#   - mac-cookie-timeout  — how long RouterOS remembers a device BY MAC
+#                           ADDRESS after its session ends, and auto-logs it
+#                           back in on rejoin with no login page at all. This
+#                           is the mechanism that actually delivers "never
+#                           ask for the PIN again while the voucher is still
+#                           valid" — unlike set-session-timeout.rsc's
+#                           http-cookie-lifetime (a BROWSER cookie), this
+#                           doesn't depend on the client's browser/HTTP
+#                           behavior at all, so it isn't broken by mobile
+#                           OSes' sandboxed captive-portal popup browsers.
+#                           Set to match http-cookie-lifetime (30d) so both
+#                           mechanisms agree on how long "recently
+#                           connected" means. Still requires the device to
+#                           present the SAME MAC address on rejoin — a phone
+#                           with "Private Wi-Fi Address" / randomized MAC
+#                           enabled for this network will still look like a
+#                           brand new device every time and get re-prompted;
+#                           that's a client-side setting no router config
+#                           can work around.
 #
 # The data cap itself is set per-voucher at creation time via
 # `limit-bytes-total` (Issue 2's fix), NOT at the profile level. If your
@@ -36,6 +55,7 @@
 
 :local idle "none"
 :local keepalive "00:02:00"
+:local macCookie "30d"
 
 :local profiles {
     {"name"="LS"; "shared"=1};
@@ -51,14 +71,14 @@
     :local pshared ($p->"shared")
     :if ([/ip hotspot user profile find name=$pname] = "") do={
         /ip hotspot user profile add name=$pname shared-users=$pshared \
-            idle-timeout=$idle keepalive-timeout=$keepalive
-        :put ("created profile: " . $pname . " (shared-users=" . $pshared . ", idle-timeout=" . $idle . ")")
+            idle-timeout=$idle keepalive-timeout=$keepalive mac-cookie-timeout=$macCookie
+        :put ("created profile: " . $pname . " (shared-users=" . $pshared . ", idle-timeout=" . $idle . ", mac-cookie-timeout=" . $macCookie . ")")
     } else={
-        # Already exists — patch the timeouts in case it was created by the
-        # earlier rewrite of this script that omitted them. shared-users is
-        # left alone (an operator may have tuned it deliberately).
+        # Already exists — patch the timeouts in case it was created by an
+        # earlier version of this script that set fewer of them. shared-users
+        # is left alone (an operator may have tuned it deliberately).
         /ip hotspot user profile set [/ip hotspot user profile find name=$pname] \
-            idle-timeout=$idle keepalive-timeout=$keepalive
-        :put ("profile exists — patched idle/keepalive timeouts: " . $pname)
+            idle-timeout=$idle keepalive-timeout=$keepalive mac-cookie-timeout=$macCookie
+        :put ("profile exists — patched idle/keepalive/mac-cookie timeouts: " . $pname)
     }
 }

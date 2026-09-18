@@ -85,21 +85,28 @@ written script, since it depends on that system's exact existing data):
   user profiles (`LS`, `standard`, `Trader Pass`, `Pro Weekly`,
   `Pro Monthly`, `Premium`) that voucher creation references by name —
   **required**, RouterOS rejects creating a hotspot user against a profile
-  that doesn't exist. Written without live router access this session —
-  verify it in a WinBox terminal before trusting it against real vouchers.
+  that doesn't exist. Also sets `mac-cookie-timeout=30d` — this is the
+  mechanism that actually delivers "never ask for the PIN again while the
+  voucher's still valid": RouterOS remembers the device BY MAC ADDRESS at
+  the router level and auto-logs it back in on rejoin, with no login page
+  and no dependency on the client's browser at all (unlike the HTTP
+  cookie below, so it isn't broken by mobile OSes' sandboxed
+  captive-portal popup browsers). Still requires the device to present
+  the same MAC on rejoin — a phone with "Private Wi-Fi Address" /
+  randomized MAC turned on for this network will look like a new device
+  every time and get re-prompted regardless of this setting; that's a
+  client-side setting no router config can override.
 - **`set-session-timeout.rsc`** — sets `http-cookie-lifetime=30d` (and
-  ensures `login-by` includes `cookie`) on the hotspot server profile.
-  This is the "stay logged in indefinitely" rule: a customer who
-  reconnects any time in the next 30 days is auto-logged back in via the
-  router's own auth cookie — no PIN re-entry, no login page. Doesn't
-  bypass real billing: RouterOS won't honor the cookie for a
-  disabled/expired hotspot user, and `expiryService.ts` /
-  `limit-bytes-total` are still what actually cut a voucher off on time.
-  Complementary to, not a replacement for,
-  `create-hotspot-profiles.rsc`'s `keepalive-timeout` — that frees up the
-  shared-users slot once a device has actually left (unavoidable;
-  RouterOS can't keep a session "active" for a radio that's off), this
-  just means coming back never requires re-entering the PIN.
+  ensures `login-by` includes `cookie`) on the hotspot server profile —
+  a browser-cookie belt-and-suspenders alongside `mac-cookie-timeout`
+  above, covering the case where the same browser reconnects even if
+  MAC-based recognition doesn't apply. Neither bypasses real billing:
+  RouterOS won't honor either mechanism for a disabled/expired hotspot
+  user, and `expiryService.ts` / `limit-bytes-total` are still what
+  actually cut a voucher off on time. `keepalive-timeout` (also in
+  `create-hotspot-profiles.rsc`) is unrelated to either — it just frees
+  the shared-users slot once a device has actually left (unavoidable;
+  RouterOS can't keep a session "active" for a radio that's off).
 - **`verify-captive-portal.rsc`** — also rewritten, as a **diagnostic**
   rather than an auto-fix (no live router access to safely test a blind
   firewall/DNS mutation against). Checks for the three most common causes
@@ -189,6 +196,25 @@ User enters PIN, taps Connect
 Router completes auth (PAP, same as always) → redirects to $(link-orig)
 ```
 
+**Reconnecting without retyping the PIN** normally happens entirely on the
+router side, via `create-hotspot-profiles.rsc`'s `mac-cookie-timeout` and
+`set-session-timeout.rsc`'s `http-cookie-lifetime` — both are RouterOS's own
+hotspot cookie, keyed by MAC address. That's transparent to this page; a
+recognized device usually never reaches login.html at all on rejoin. It
+doesn't help iOS/macOS, though — Private Wi-Fi Address regenerates a new MAC
+on every reconnect to a hotspot-type network by default, so the router can
+never recognize the device no matter how long the cookie timeout is (this is
+Apple's own behavior, not something router config can see through). As a
+device-independent fallback, `login.html` also remembers the last successful
+PIN in this browser's `localStorage` and auto-submits it on the next visit —
+still a real login handshake each time (so it's a beat slower than the
+router-cookie path, not invisible), but no typing required. Deliberately
+skips calling the backend to pre-validate that PIN: RouterOS's own login
+response already tells us if it's gone bad (redisplays this same page with
+`$(error)` set), so this stays dependency-free like the rest of the auth
+path — a bad/expired/disabled PIN just shows the normal error, and the
+stored PIN gets forgotten so it won't keep retrying.
+
 **Status, buy, and recover are the Vercel SPA.** `status.html` is still a
 thin redirect stub → `/portal/status`, because that page's value is real:
 usage figures come from `usage_snapshots` (persists across reconnects)
@@ -224,11 +250,12 @@ is missing.
    so a device that leaves without logging out doesn't hold its
    `shared-users` slot and block the next login (`idle-timeout` is
    deliberately left disabled, so a device that's just quiet for a few
-   minutes doesn't get logged out for that alone).
+   minutes doesn't get logged out for that alone), and `mac-cookie-timeout`
+   so a device that reconnects — even the next day — auto-joins with no
+   PIN prompt, as long as it presents the same MAC address.
 3. Run `router-scripts/set-session-timeout.rsc` — sets `http-cookie-lifetime`
-   to 30 days so a customer who steps away and comes back is auto-reconnected
-   without re-entering their PIN, for as long as their voucher itself is
-   still valid.
+   to 30 days, a browser-cookie fallback alongside `mac-cookie-timeout` for
+   the same "no PIN prompt on reconnect" behavior.
 3. `alogin.html`, `rlogin.html`, `redirect.html`, `radvert.html` are left as
    local static files (still on the router, unchanged) — they're pure
    transitional spinners with no user-specific data to render, so there's no
