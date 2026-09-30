@@ -255,7 +255,17 @@ is missing.
    PIN prompt, as long as it presents the same MAC address.
 3. Run `router-scripts/set-session-timeout.rsc` — sets `http-cookie-lifetime`
    to 30 days, a browser-cookie fallback alongside `mac-cookie-timeout` for
-   the same "no PIN prompt on reconnect" behavior.
+   the same "no PIN prompt on reconnect" behavior, and adds `mac-cookie` to
+   the hotspot server profile's `login-by` (without it, `mac-cookie-timeout`
+   never takes effect and no device is ever recognised by MAC).
+3. Run `router-scripts/newest-login-wins.rsc` (after `create-hotspot-profiles.rsc`)
+   — "a plan allows N devices, the newest login wins". Gives each plan
+   profile one spare `shared-users` slot and an `on-login` hook that closes
+   the voucher's longest-idle other session when it goes over N, so a phone
+   whose MAC changes between access points is never refused with "no more
+   sessions are allowed" while its stale session times out. See the script's
+   header for the safety checks, staged rollout (`rollout`/`dryRun`) and the
+   rollback commands.
 3. `alogin.html`, `rlogin.html`, `redirect.html`, `radvert.html` are left as
    local static files (still on the router, unchanged) — they're pure
    transitional spinners with no user-specific data to render, so there's no
