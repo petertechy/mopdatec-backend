@@ -7,7 +7,9 @@
 # doesn't already exist on the router, the API call is rejected outright.
 #
 # Sets, per profile:
-#   - shared-users        — concurrent devices allowed per voucher
+#   - shared-users        — concurrent devices allowed per voucher (N). Run
+#                           newest-login-wins.rsc afterwards: it raises this
+#                           to N+1 and enforces N itself on login.
 #   - idle-timeout        — deliberately DISABLED (none). A device that's
 #                           still connected but just quiet for a few minutes
 #                           (screen locked, no active traffic) must NOT lose

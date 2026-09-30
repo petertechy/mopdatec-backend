@@ -20,6 +20,14 @@
 # "cookie" for this to fire at all — added if missing rather than
 # overwriting the other methods already configured.
 #
+# login-by must ALSO include "mac-cookie", or the per-plan
+# mac-cookie-timeout / add-mac-cookie that create-hotspot-profiles.rsc sets
+# never takes effect: RouterOS only creates and honours MAC cookies when the
+# server profile allows that login method. Without it, a device that
+# re-associates (roaming between access points, Wi-Fi toggled off/on) has
+# to go through the captive-portal page again to be recognised by the HTTP
+# cookie, instead of being let straight back in by MAC at the router.
+#
 # This does NOT bypass real billing/expiry: RouterOS won't honor the
 # cookie for a disabled or expired hotspot user, and expiryService.ts /
 # limit-bytes-total are what actually disable a voucher on time — the
@@ -54,16 +62,15 @@
         } else={
             :local loginBy [/ip hotspot profile get $prof login-by]
             :local hasCookie false
+            :local hasMacCookie false
             :foreach method in=$loginBy do={
                 :if ($method = "cookie") do={ :set hasCookie true }
+                :if ($method = "mac-cookie") do={ :set hasMacCookie true }
             }
-            :if ($hasCookie) do={
-                /ip hotspot profile set $prof http-cookie-lifetime=$cookieLifetime
-                :put ("patched \"" . $pname . "\": http-cookie-lifetime=" . $cookieLifetime)
-            } else={
-                /ip hotspot profile set $prof http-cookie-lifetime=$cookieLifetime login-by=($loginBy , "cookie")
-                :put ("patched \"" . $pname . "\": http-cookie-lifetime=" . $cookieLifetime . ", added \"cookie\" to login-by")
-            }
+            :if (!$hasCookie) do={ :set loginBy ($loginBy , "cookie") }
+            :if (!$hasMacCookie) do={ :set loginBy ($loginBy , "mac-cookie") }
+            /ip hotspot profile set $prof http-cookie-lifetime=$cookieLifetime login-by=$loginBy
+            :put ("patched \"" . $pname . "\": http-cookie-lifetime=" . $cookieLifetime . ", login-by=" . [:tostr $loginBy])
             :set patchedAny true
         }
     }
