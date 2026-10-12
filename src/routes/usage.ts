@@ -1,8 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { requireAdmin, requireWebhookSecret } from "../middleware/auth";
-import { getActiveUsage, ingestUsageEvent } from "../services/usageService";
-import { listActiveSessions } from "../routeros/client";
+import { getActiveUsage, syncUsageFromRouter } from "../services/usageService";
 import { getIO } from "../sockets/io";
 
 export const usageRouter = Router();
@@ -17,18 +16,7 @@ usageRouter.get("/active", requireAdmin, async (_req, res) => {
 // enforcement is native limit-bytes-total on the router regardless of this).
 usageRouter.post("/poll", requireAdmin, async (_req, res) => {
   try {
-    const sessions = await listActiveSessions();
-    const results = [];
-    for (const s of sessions) {
-      const row = await ingestUsageEvent({
-        user: s.user,
-        sessionId: s.sessionId,
-        address: s.address,
-        bytesIn: s.bytesIn,
-        bytesOut: s.bytesOut,
-      });
-      if (row) results.push(row);
-    }
+    const results = await syncUsageFromRouter();
     getIO().emit("usage:bulk-update", results);
     res.json({ polled: results.length });
   } catch (err: any) {
@@ -60,11 +48,9 @@ usageRouter.post("/webhook", requireWebhookSecret, async (req, res) => {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
 
-  const updates = [];
-  for (const event of parsed.data) {
-    const row = await ingestUsageEvent(event);
-    if (row) updates.push(row);
-  }
+  // The router's own counters are the source of truth; the push just means
+  // "something changed", so re-read the router instead of trusting the payload.
+  const updates = await syncUsageFromRouter();
 
   if (updates.length > 0) {
     getIO().emit("usage:bulk-update", updates);

@@ -30,3 +30,12 @@ describe("buildSessions", () => {
     expect(r.totalBytes).toBe(121);
   });
 });
+
+describe("buildSessions with concurrent devices", () => {
+  it("does not double-count interleaved snapshots from two live sessions", () => {
+    const r = buildSessions([snap("*A", 0, 100, 0), snap("*B", 0, 50, 0), snap("*A", 0, 150, 1), snap("*B", 0, 80, 1)]);
+    expect(r.sessions.map((s) => s.bytesTotal)).toEqual([150, 80]);
+    expect(r.totalBytes).toBe(230);
+    expect(r.timeline.map((t) => t.cumulativeBytes)).toEqual([100, 150, 200, 230]);
+  });
+});

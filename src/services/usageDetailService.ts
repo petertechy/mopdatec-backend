@@ -28,25 +28,27 @@ const MAX_TIMELINE_POINTS = 300;
 /**
  * Rebuilds per-session usage from raw usage_snapshots rows (oldest first).
  *
- * Uses the same "new session" rule as usageService.ingestUsageEvent: a
- * different session_id, OR the same id with a LOWER byte count (RouterOS can
- * reuse a session id after a rapid logout/login — see the LS-E4MBY note
- * there). Grouping by session_id alone would merge those and undercount.
+ * Tracks each router session_id independently, so a shared voucher with
+ * several devices online at once (snapshots from device A and B interleaved)
+ * isn't mistaken for constant session switching. A session_id's counter only
+ * ever grows, so a LOWER reading under the same id means RouterOS reused the
+ * id for a genuinely new connection (see the LS-E4MBY note in usageService)
+ * and starts a new session entry.
  *
- * Pure (no DB) so it's unit-testable.
+ * The running total is the sum of every session's latest reading, so it is
+ * monotonic and never double-counts. Pure (no DB) so it's unit-testable.
  */
 export function buildSessions(snapshots: SnapshotRow[]): { sessions: UsageSession[]; timeline: TimelinePoint[]; totalBytes: number } {
   const sessions: UsageSession[] = [];
   const timeline: TimelinePoint[] = [];
-  let current: UsageSession | null = null;
-  let banked = 0;
+  const latestById = new Map<string, UsageSession>();
+  let sum = 0;
 
   for (const s of snapshots) {
     const total = s.bytesIn + s.bytesOut;
-    const isNew = !current || current.sessionId !== s.sessionId || total < current.bytesTotal;
-    if (isNew) {
-      if (current) banked += current.bytesTotal;
-      current = {
+    const cur = latestById.get(s.sessionId);
+    if (!cur || total < cur.bytesTotal) {
+      const created: UsageSession = {
         sessionId: s.sessionId,
         ipAddress: s.ipAddress,
         startedAt: s.recordedAt,
@@ -55,19 +57,21 @@ export function buildSessions(snapshots: SnapshotRow[]): { sessions: UsageSessio
         bytesOut: s.bytesOut,
         bytesTotal: total,
       };
-      sessions.push(current);
-    } else if (current) {
-      current.endedAt = s.recordedAt;
-      current.bytesIn = s.bytesIn;
-      current.bytesOut = s.bytesOut;
-      current.bytesTotal = total;
-      current.ipAddress = s.ipAddress ?? current.ipAddress;
+      sessions.push(created);
+      latestById.set(s.sessionId, created);
+      sum += total;
+    } else {
+      sum += total - cur.bytesTotal;
+      cur.endedAt = s.recordedAt;
+      cur.bytesIn = s.bytesIn;
+      cur.bytesOut = s.bytesOut;
+      cur.bytesTotal = total;
+      cur.ipAddress = s.ipAddress ?? cur.ipAddress;
     }
-    timeline.push({ at: s.recordedAt, cumulativeBytes: banked + (current ? current.bytesTotal : 0) });
+    timeline.push({ at: s.recordedAt, cumulativeBytes: sum });
   }
 
-  const totalBytes = banked + (current ? (current as UsageSession).bytesTotal : 0);
-  return { sessions, timeline: downsample(timeline), totalBytes };
+  return { sessions, timeline: downsample(timeline), totalBytes: sum };
 }
 
 /** Keeps the first/last points and an even spread between, so the chart payload stays small. */

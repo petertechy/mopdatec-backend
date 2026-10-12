@@ -255,3 +255,43 @@ export async function testConnection(): Promise<boolean> {
     return false;
   }
 }
+
+export interface VoucherRouterUsage {
+  pin: string;
+  closedBytes: number; // hotspot user bytes-in + bytes-out (RouterOS adds a session when it ends)
+  sessions: ActiveSession[]; // live sessions right now
+}
+
+/**
+ * Router-authoritative usage: the same numbers RouterOS uses for its own
+ * limit-bytes-total check. One connection, sequential calls (node-routeros
+ * sockets can't be shared concurrently).
+ */
+export async function getVoucherUsageFromRouter(): Promise<Map<string, VoucherRouterUsage>> {
+  return withConnection(async (api) => {
+    const users = (await api.write("/ip/hotspot/user/print", [
+      "=.proplist=name,bytes-in,bytes-out",
+    ])) as any[];
+    const active = (await api.write("/ip/hotspot/active/print")) as any[];
+
+    const byPin = new Map<string, VoucherRouterUsage>();
+    for (const u of users) {
+      byPin.set(u.name, {
+        pin: u.name,
+        closedBytes: parseInt(u["bytes-in"] || "0", 10) + parseInt(u["bytes-out"] || "0", 10),
+        sessions: [],
+      });
+    }
+    for (const r of active) {
+      byPin.get(r.user)?.sessions.push({
+        sessionId: r[".id"],
+        user: r.user,
+        address: r.address,
+        bytesIn: parseInt(r["bytes-in"] || "0", 10),
+        bytesOut: parseInt(r["bytes-out"] || "0", 10),
+        uptime: r.uptime,
+      });
+    }
+    return byPin;
+  });
+}
