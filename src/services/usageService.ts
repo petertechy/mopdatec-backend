@@ -2,6 +2,7 @@ import { pool } from "../db/pool";
 import { disableVoucher } from "./voucherService";
 import { getVoucherUsageFromRouter } from "../routeros/client";
 import { getIO } from "../sockets/io";
+import { notifyDataUsage } from "./pushService";
 
 export interface UsageRow {
   sessionId: string;
@@ -201,6 +202,14 @@ async function doSync(): Promise<UsageRow[]> {
       console.log(`[usageService] voucher ${v.pin} reached its cap - disabling (backup enforcement)`);
       await disableVoucher(v.pin, "cap_reached").catch((err) =>
         console.error(`[usageService] backup disable failed for ${v.pin}:`, err.message),
+      );
+    }
+
+    // Customer push alerts at 20/10/5% left — fire-and-forget so a slow push
+    // service can never delay the sync (or the cap enforcement above).
+    if (bytesLimit !== null) {
+      notifyDataUsage(v.pin, bytesUsed, bytesLimit, v.label).catch((err) =>
+        console.error(`[usageService] push alert failed for ${v.pin}:`, err?.message || err),
       );
     }
 

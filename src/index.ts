@@ -16,6 +16,7 @@ import { statsRouter } from "./routes/stats";
 import { ensureBootstrapAdmin } from "./services/adminService";
 import { startExpiryCron } from "./services/expiryService";
 import { startUsagePoller } from "./services/usageService";
+import { startNotificationCron } from "./services/pushService";
 import { getCachedRouterHealth, startRouterHealthMonitor } from "./services/routerHealthService";
 
 // Last-resort net for node-routeros (1.6.9, unmaintained since Jan 2021)
@@ -101,6 +102,7 @@ ensureBootstrapAdmin()
     startExpiryCron();
     startRouterHealthMonitor();
     startUsagePoller();
+    startNotificationCron();
     httpServer.listen(env.port, () => {
       console.log(`[server] listening on :${env.port} (${env.nodeEnv})`);
     });

@@ -1,4 +1,15 @@
 import { Router } from "express";
+import { z } from "zod";
+import {
+  pushEnabled,
+  getPublicKey,
+  isAllowedPushEndpoint,
+  saveSubscription,
+  removeSubscription,
+  hasSubscription,
+  VoucherNotFoundForPushError,
+  TooManySubscriptionsError,
+} from "../services/pushService";
 import {
   getUsageForVoucher,
   refreshVoucherUsage,
@@ -72,6 +83,54 @@ portalRouter.post("/logout-session/:pin", async (req, res) => {
       .status(503)
       .json({ error: "Could not clear the previous session right now" });
   }
+});
+
+// --- Browser push alerts (20/10/5% data left; 5/2 days before an unlimited
+// plan expires). Public like the rest of the portal: the PIN is the
+// credential. Endpoints are allow-listed to real push services (see
+// pushService.isAllowedPushEndpoint) because the server POSTs to them.
+const subscriptionSchema = z.object({
+  endpoint: z.string().url().max(2048),
+  keys: z.object({ p256dh: z.string().min(1).max(256), auth: z.string().min(1).max(256) }),
+});
+const endpointSchema = z.object({ endpoint: z.string().url().max(2048) });
+
+portalRouter.get("/push/public-key", (_req, res) => {
+  if (!pushEnabled()) return res.status(503).json({ error: "Push notifications are not enabled" });
+  res.json({ publicKey: getPublicKey() });
+});
+
+portalRouter.post("/push/:pin/subscribe", async (req, res) => {
+  if (!pushEnabled()) return res.status(503).json({ error: "Push notifications are not enabled" });
+  const parsed = subscriptionSchema.safeParse(req.body);
+  if (!parsed.success || !isAllowedPushEndpoint(parsed.data.endpoint)) {
+    return res.status(400).json({ error: "Invalid push subscription" });
+  }
+  try {
+    await saveSubscription(req.params.pin.toUpperCase(), parsed.data);
+    res.json({ subscribed: true });
+  } catch (err: any) {
+    if (err instanceof VoucherNotFoundForPushError) return res.status(404).json({ error: "Voucher not found" });
+    if (err instanceof TooManySubscriptionsError) {
+      return res.status(429).json({ error: "Too many devices are already subscribed to this voucher" });
+    }
+    console.error("[portal] push subscribe failed:", err?.message || err);
+    res.status(500).json({ error: "Could not save the subscription" });
+  }
+});
+
+portalRouter.post("/push/:pin/unsubscribe", async (req, res) => {
+  const parsed = endpointSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid request" });
+  await removeSubscription(req.params.pin.toUpperCase(), parsed.data.endpoint);
+  res.json({ subscribed: false });
+});
+
+// Lets the status page show "alerts on" for the browser it's open in.
+portalRouter.post("/push/:pin/check", async (req, res) => {
+  const parsed = endpointSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid request" });
+  res.json({ subscribed: await hasSubscription(req.params.pin.toUpperCase(), parsed.data.endpoint) });
 });
 
 // Called by the portal login page immediately after it submits the auth form

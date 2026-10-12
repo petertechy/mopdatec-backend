@@ -196,6 +196,29 @@ CREATE TABLE IF NOT EXISTS payments (
 
 CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
 
+-- Customer browser push subscriptions (Web Push), one row per browser per
+-- voucher — the same browser may follow several PINs, hence the composite
+-- key rather than a unique endpoint. ON DELETE CASCADE so deleting a
+-- never-used voucher (voucherService.deleteVoucher) isn't blocked by these.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id          BIGSERIAL PRIMARY KEY,
+  voucher_pin TEXT NOT NULL REFERENCES vouchers(pin) ON DELETE CASCADE,
+  endpoint    TEXT NOT NULL,
+  p256dh      TEXT NOT NULL,
+  auth        TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (voucher_pin, endpoint)
+);
+
+-- Which alerts a voucher has already had, so each threshold (data_20,
+-- data_10, data_5, expiry_5d, expiry_2d) fires at most once per voucher.
+CREATE TABLE IF NOT EXISTS notification_log (
+  voucher_pin TEXT NOT NULL REFERENCES vouchers(pin) ON DELETE CASCADE,
+  kind        TEXT NOT NULL,
+  sent_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (voucher_pin, kind)
+);
+
 -- Seed plan data (mirrors plan-data.js exactly — see original project audit).
 INSERT INTO plans (key, prefix, label, duration_label, chip_label, profile, bytes_limit, duration_days, shared_users, price_kobo)
 VALUES

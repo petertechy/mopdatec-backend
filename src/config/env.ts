@@ -42,6 +42,16 @@ export const env = {
   // deployments that haven't set up online payments yet. paymentService
   // checks these at call time and fails clearly if a route needs them and
   // they're empty, rather than crashing the whole process at boot.
+  // Optional — Web Push alerts to customers' browsers. Generate a keypair
+  // once with `npx web-push generate-vapid-keys` and keep it stable (changing
+  // it invalidates every existing subscription). Without these the feature
+  // is simply off; see pushService.pushEnabled().
+  vapid: {
+    publicKey: process.env.VAPID_PUBLIC_KEY || "",
+    privateKey: process.env.VAPID_PRIVATE_KEY || "",
+    subject: process.env.VAPID_SUBJECT || "",
+  },
+
   paystack: {
     secretKey: process.env.PAYSTACK_SECRET_KEY || "",
     publicKey: process.env.PAYSTACK_PUBLIC_KEY || "",
