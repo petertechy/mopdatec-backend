@@ -41,7 +41,7 @@ export async function expireOverdueVouchers(): Promise<void> {
   console.log(`[expiryService] ${pins.length} voucher(s) past expiry — disabling...`);
   for (const pin of pins) {
     try {
-      await disableVoucher(pin);
+      await disableVoucher(pin, "expired");
       console.log(`[expiryService] disabled expired voucher ${pin}`);
     } catch (err: any) {
       // One failure (e.g. router unreachable) shouldn't block the rest of

@@ -192,9 +192,26 @@ export async function listVouchers(opts: ListVouchersOptions = {}): Promise<Vouc
 }
 
 /** Issue 4: bulk-disable every session under one voucher PIN, both steps, on the router AND in the DB. */
-export async function disableVoucher(pin: string): Promise<{ sessionsRemoved: number }> {
+export type DisabledReason = "cap_reached" | "expired" | "manual";
+
+/**
+ * `reason` is recorded so a data-usage dispute can be answered later (see
+ * usageDetailService). COALESCE keeps the FIRST reason/time if a voucher is
+ * disabled again — e.g. an admin clicking Disable on a cap-reached voucher
+ * shouldn't rewrite why it originally stopped.
+ */
+export async function disableVoucher(
+  pin: string,
+  reason: DisabledReason = "manual",
+): Promise<{ sessionsRemoved: number }> {
   const result = await disableVoucherEverywhere(pin);
-  await pool.query("UPDATE vouchers SET disabled = true WHERE pin = $1", [pin]);
+  await pool.query(
+    `UPDATE vouchers SET disabled = true,
+            disabled_reason = COALESCE(disabled_reason, $2),
+            disabled_at = COALESCE(disabled_at, now())
+     WHERE pin = $1`,
+    [pin, reason],
+  );
   return result;
 }
 

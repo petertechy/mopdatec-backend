@@ -120,6 +120,12 @@ ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS usage_last_recorded_at TIMESTAMPTZ
 
 -- Idempotent companion for the archive column above (installs that predate it).
 ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+-- Why/when a voucher was disabled, so a customer disputing "I didn't use my
+-- data" can be answered at a glance: 'cap_reached' (data limit hit),
+-- 'expired' (validity ran out) or 'manual' (an admin did it). NULL on
+-- vouchers disabled before this column existed — shown as "unknown".
+ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS disabled_reason TEXT;
+ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ;
 -- Partial index: every list query and every Overview count now filters
 -- `archived_at IS NULL`, and archived rows are the permanent minority.
 CREATE INDEX IF NOT EXISTS idx_vouchers_active ON vouchers(created_at DESC) WHERE archived_at IS NULL;

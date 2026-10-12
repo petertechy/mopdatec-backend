@@ -12,6 +12,7 @@ import {
   VoucherNotFoundError,
 } from "../services/voucherService";
 import { logAction } from "../services/auditService";
+import { getVoucherUsageDetail } from "../services/usageDetailService";
 
 const listQuerySchema = z.object({
   search: z.string().trim().min(1).optional(),
@@ -63,6 +64,18 @@ vouchersRouter.get("/", async (req, res) => {
   }
   const vouchers = await listVouchers(parsed.data);
   res.json({ vouchers });
+});
+
+// Usage dispute lookup — deliberately works for disabled/expired/archived
+// vouchers too (that's the whole point). Read-only, so not audit-logged.
+vouchersRouter.get("/:pin/usage", async (req, res) => {
+  try {
+    const detail = await getVoucherUsageDetail(req.params.pin);
+    if (!detail) return res.status(404).json({ error: `Voucher ${req.params.pin} not found` });
+    res.json(detail);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Issue 4: bulk-disable every active session under this PIN + block future logins.

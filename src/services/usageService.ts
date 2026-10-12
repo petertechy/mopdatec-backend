@@ -247,7 +247,7 @@ export async function ingestUsageEvent(event: IncomingUsageEvent): Promise<Usage
 
   if (!voucher.disabled && bytesLimit !== null && bytesUsed >= bytesLimit) {
     console.log(`[usageService] voucher ${event.user} reached its cap — disabling (backup enforcement)`);
-    await disableVoucher(event.user).catch((err) =>
+    await disableVoucher(event.user, "cap_reached").catch((err) =>
       console.error(`[usageService] backup disable failed for ${event.user}:`, err.message),
     );
   }
