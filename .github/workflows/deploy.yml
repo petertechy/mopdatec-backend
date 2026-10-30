@@ -29,12 +29,13 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+          HOST=$(printf '%s' "$VPS_HOST" | tr -d '[:space:]')
 
-          ssh -o BatchMode=yes root@"$VPS_HOST" 'bash -se' <<'EOF'
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
+            root@"$HOST" 'bash -se' <<'EOF'
           set -euo pipefail
-          # Build as whoever owns the checkout (root on this VPS, despite the
-          # service running as mopdatec) so git/npm never hit permission errors.
+          # Build as whoever owns the checkout (mopdatec, normally) so new
+          # files keep that owner and git/npm never hit permission errors.
           OWNER=$(stat -c %U /opt/mopdatec-backend)
           echo "== building as $OWNER"
           sudo -u "$OWNER" -H bash -c '
