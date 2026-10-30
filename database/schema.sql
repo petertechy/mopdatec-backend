@@ -126,6 +126,22 @@ ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 -- vouchers disabled before this column existed — shown as "unknown".
 ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS disabled_reason TEXT;
 ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ;
+-- Lost-session recovery (see usageService.reconcileLostBytes). RouterOS only
+-- adds a session's bytes to the hotspot user counter when the session closes
+-- cleanly — a reboot/power cut drops active sessions without ever counting
+-- them, so the router (and anything mirroring it) silently forgets that data.
+--   usage_live_sessions  last-seen {bytes, uptimeSec} per live session id
+--   usage_closed_floor   the lowest the router's user counter should be, given
+--                        every session we've seen end
+--   usage_lost_pending   floor - router counter as of the last poll (may be a
+--                        transient race; only confirmed once it persists)
+--   usage_lost_bytes     confirmed lost bytes — added on top of banked+current
+-- NULL usage_live_sessions/usage_closed_floor = not tracked yet; the first
+-- poll just initialises them, so the fix is forward-only.
+ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS usage_live_sessions JSONB;
+ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS usage_closed_floor BIGINT;
+ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS usage_lost_pending BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE vouchers ADD COLUMN IF NOT EXISTS usage_lost_bytes BIGINT NOT NULL DEFAULT 0;
 -- Partial index: every list query and every Overview count now filters
 -- `archived_at IS NULL`, and archived rows are the permanent minority.
 CREATE INDEX IF NOT EXISTS idx_vouchers_active ON vouchers(created_at DESC) WHERE archived_at IS NULL;
@@ -169,6 +185,7 @@ SELECT DISTINCT ON (us.session_id)
   v.expires_at,
   v.usage_banked_bytes,
   v.usage_current_session_bytes,
+  v.usage_lost_bytes,
   p.label       AS plan_label,
   p.bytes_limit AS plan_bytes_limit
 FROM usage_snapshots us
@@ -218,6 +235,45 @@ CREATE TABLE IF NOT EXISTS notification_log (
   sent_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (voucher_pin, kind)
 );
+
+-- Lock every table out of Supabase's auto-generated public API (PostgREST,
+-- reachable with the project's public anon key). The backend connects
+-- directly via DATABASE_URL as the table owner, which bypasses RLS, so
+-- enabling RLS with NO policies blocks the API without affecting the app.
+-- Flagged by Supabase's Security Advisor (rls_disabled_in_public) — see
+-- Advisors -> Security Advisor in the dashboard. Harmless on plain Postgres.
+ALTER TABLE admins             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE admin_audit_log    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE plans              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE vouchers           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usage_snapshots    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payments           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE push_subscriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE notification_log   ENABLE ROW LEVEL SECURITY;
+
+-- latest_usage is DROPped and recreated above on every run, which resets it
+-- to the default SECURITY DEFINER behaviour (Advisor: security_definer_view)
+-- — re-apply security_invoker so the view enforces the caller's RLS rather
+-- than the owner's. security_invoker needs Postgres 15+ (Supabase is), so
+-- skip it on older local/Render installs instead of failing the whole file.
+DO $$
+BEGIN
+  IF current_setting('server_version_num')::int >= 150000 THEN
+    EXECUTE 'ALTER VIEW latest_usage SET (security_invoker = true)';
+  END IF;
+END $$;
+
+-- Belt and braces: strip the Supabase API roles' table grants too. These
+-- roles only exist on Supabase, so this is a no-op elsewhere.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA public FROM authenticated';
+  END IF;
+END $$;
 
 -- Seed plan data (mirrors plan-data.js exactly — see original project audit).
 INSERT INTO plans (key, prefix, label, duration_label, chip_label, profile, bytes_limit, duration_days, shared_users, price_kobo)

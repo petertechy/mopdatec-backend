@@ -128,6 +128,24 @@ export async function createHotspotUser(
 }
 
 /**
+ * Re-points the router's native cap. RouterOS checks limit-bytes-total against
+ * its own user counter, which forgets sessions killed by a reboot — so when
+ * usageService detects lost bytes it lowers the limit by that amount to keep
+ * the customer's real remaining allowance.
+ */
+export async function setHotspotUserLimit(pin: string, limitBytesTotal: number): Promise<void> {
+  await withConnection(async (api) => {
+    const users = await api.write("/ip/hotspot/user/print", [`?name=${pin}`]);
+    for (const user of users as any[]) {
+      await api.write("/ip/hotspot/user/set", [
+        `=.id=${user[".id"]}`,
+        `=limit-bytes-total=${Math.max(1, Math.floor(limitBytesTotal))}`,
+      ]);
+    }
+  });
+}
+
+/**
  * Issue 4: disabling a shared voucher requires BOTH steps — removing every
  * active session under this PIN (kicks already-connected devices) AND
  * disabling the user (blocks future logins). Neither alone is sufficient.
@@ -266,6 +284,11 @@ export interface VoucherRouterUsage {
  * Router-authoritative usage: the same numbers RouterOS uses for its own
  * limit-bytes-total check. One connection, sequential calls (node-routeros
  * sockets can't be shared concurrently).
+ *
+ * Order matters: users BEFORE active. A session that ends between the two
+ * reads then shows up in neither (not yet counted, already gone) — a
+ * shortfall that usageService treats as pending and that clears on the next
+ * poll. The reverse order would count it twice and look like a permanent loss.
  */
 export async function getVoucherUsageFromRouter(): Promise<Map<string, VoucherRouterUsage>> {
   return withConnection(async (api) => {

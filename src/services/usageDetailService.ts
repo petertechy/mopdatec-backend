@@ -87,8 +87,10 @@ export interface VoucherUsageDetail {
   pin: string;
   planLabel: string;
   bytesLimit: number | null;
-  /** Authoritative lifetime total kept on the voucher row (banked + current session). */
+  /** Authoritative lifetime total kept on the voucher row (banked + current session + lost). */
   bytesUsed: number;
+  /** Part of bytesUsed the router forgot (sessions killed by a reboot/power cut) — see usageService.reconcileLostBytes. */
+  lostBytes: number;
   /** Total re-derived from the raw snapshots — a cross-check on bytesUsed. */
   snapshotTotalBytes: number;
   percentUsed: number | null;
@@ -111,7 +113,7 @@ export async function getVoucherUsageDetail(pin: string): Promise<VoucherUsageDe
   const voucherRes = await pool.query(
     `SELECT v.pin, v.disabled, v.disabled_reason, v.disabled_at, v.created_at, v.expires_at,
             v.redeemed_at, v.archived_at, v.usage_banked_bytes, v.usage_current_session_bytes,
-            v.usage_last_recorded_at, p.label, p.bytes_limit
+            v.usage_lost_bytes, v.usage_last_recorded_at, p.label, p.bytes_limit
      FROM vouchers v JOIN plans p ON p.key = v.plan_key
      WHERE v.pin = $1`,
     [pin],
@@ -146,7 +148,8 @@ export async function getVoucherUsageDetail(pin: string): Promise<VoucherUsageDe
   }
 
   const bytesLimit = v.bytes_limit === null ? null : Number(v.bytes_limit);
-  const bytesUsed = Number(v.usage_banked_bytes) + Number(v.usage_current_session_bytes);
+  const lostBytes = Number(v.usage_lost_bytes);
+  const bytesUsed = Number(v.usage_banked_bytes) + Number(v.usage_current_session_bytes) + lostBytes;
   const status = v.archived_at
     ? "archived"
     : v.disabled
@@ -160,6 +163,7 @@ export async function getVoucherUsageDetail(pin: string): Promise<VoucherUsageDe
     planLabel: v.label,
     bytesLimit,
     bytesUsed,
+    lostBytes,
     snapshotTotalBytes: totalBytes,
     percentUsed: bytesLimit === null ? null : Math.min(100, Math.round((bytesUsed / bytesLimit) * 100)),
     status,

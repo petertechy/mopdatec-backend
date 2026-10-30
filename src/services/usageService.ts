@@ -1,6 +1,6 @@
 import { pool } from "../db/pool";
 import { disableVoucher } from "./voucherService";
-import { getVoucherUsageFromRouter } from "../routeros/client";
+import { getVoucherUsageFromRouter, setHotspotUserLimit } from "../routeros/client";
 import { getIO } from "../sockets/io";
 import { notifyDataUsage } from "./pushService";
 
@@ -21,7 +21,7 @@ function mapLatestUsageRow(r: any): UsageRow {
   // Voucher-level cumulative total (banked + current session) — NOT the raw
   // per-session bytes_in/bytes_out, which reset every time a session gets
   // recycled. See the usage_banked_bytes comment on the vouchers table.
-  const bytesUsed = Number(r.usage_banked_bytes) + Number(r.usage_current_session_bytes);
+  const bytesUsed = Number(r.usage_banked_bytes) + Number(r.usage_current_session_bytes) + Number(r.usage_lost_bytes);
 
   return {
     sessionId: r.session_id,
@@ -64,13 +64,14 @@ export interface PortalUsage {
  * landed yet (e.g. right after redemption, before the first webhook push).
  *
  * bytesUsed is the voucher's cumulative lifetime total (usage_banked_bytes +
- * usage_current_session_bytes, maintained by syncUsageFromRouter) — NOT a raw
- * session snapshot, which would reset to near-zero on every reconnect.
+ * usage_current_session_bytes + usage_lost_bytes, maintained by
+ * syncUsageFromRouter) — NOT a raw session snapshot, which would reset to
+ * near-zero on every reconnect.
  */
 export async function getUsageForVoucher(pin: string): Promise<PortalUsage | null> {
   const voucherRes = await pool.query(
     `SELECT v.pin, v.disabled, v.expires_at, v.usage_banked_bytes, v.usage_current_session_bytes,
-            v.usage_last_recorded_at, p.label, p.bytes_limit
+            v.usage_lost_bytes, v.usage_last_recorded_at, p.label, p.bytes_limit
      FROM vouchers v JOIN plans p ON p.key = v.plan_key
      WHERE v.pin = $1`,
     [pin],
@@ -78,7 +79,7 @@ export async function getUsageForVoucher(pin: string): Promise<PortalUsage | nul
   if (voucherRes.rows.length === 0) return null;
   const v = voucherRes.rows[0];
   const bytesLimit = v.bytes_limit === null ? null : Number(v.bytes_limit);
-  const bytesUsed = Number(v.usage_banked_bytes) + Number(v.usage_current_session_bytes);
+  const bytesUsed = Number(v.usage_banked_bytes) + Number(v.usage_current_session_bytes) + Number(v.usage_lost_bytes);
   const recordedAt: string | null = v.usage_last_recorded_at;
   const hasActiveSession = recordedAt !== null && new Date(recordedAt).getTime() > Date.now() - 10 * 60 * 1000;
 
@@ -137,6 +138,69 @@ export async function markRedeemed(pin: string): Promise<void> {
   );
 }
 
+export interface LiveSessionMark {
+  bytes: number;
+  uptimeSec: number;
+}
+
+const UPTIME_UNITS: Record<string, number> = { w: 604800, d: 86400, h: 3600, m: 60, s: 1, ms: 0.001 };
+
+/** Parses RouterOS durations: "1w2d3h4m5s", "5s200ms", "01:02:03" or "2d01:02:03". */
+export function parseRouterUptime(value: string | undefined): number {
+  if (!value) return 0;
+  let rest = value;
+  let total = 0;
+  const clock = rest.match(/(\d+):(\d+):(\d+)$/);
+  if (clock) {
+    total += Number(clock[1]) * 3600 + Number(clock[2]) * 60 + Number(clock[3]);
+    rest = rest.slice(0, clock.index);
+  }
+  for (const [, n, unit] of rest.matchAll(/(\d+)(ms|[wdhms])/g)) total += Number(n) * UPTIME_UNITS[unit];
+  return total;
+}
+
+export interface LostBytesState {
+  liveSessions: Record<string, LiveSessionMark> | null;
+  closedFloor: number | null;
+  lostPending: number;
+  lostBytes: number;
+}
+
+/**
+ * Detects bytes the router forgot. RouterOS adds a session to the hotspot
+ * user counter only when it closes cleanly; a reboot or power cut drops
+ * active sessions uncounted (seen on LS-ST9JC / LS-NA9XF, both losing their
+ * sessions at the same minute), which also defeats the router's own cap.
+ *
+ * Every session we saw live and that has since ended (gone, or its id reused
+ * with a lower uptime) raises closedFloor — the least the router's counter
+ * should now read. The shortfall floor - closedBytes is the loss. It is only
+ * confirmed once it shows on two polls in a row, because a session ending
+ * between getVoucherUsageFromRouter's two reads looks like a one-poll
+ * shortfall that the next poll clears.
+ *
+ * First call (nothing tracked yet) just initialises, so this never
+ * retroactively charges sessions that ended before it was deployed. Pure
+ * (no DB) so it's unit-testable.
+ */
+export function reconcileLostBytes(
+  prev: LostBytesState,
+  closedBytes: number,
+  live: Record<string, LiveSessionMark>,
+): { closedFloor: number; lostPending: number; lostBytes: number } {
+  if (prev.liveSessions === null || prev.closedFloor === null) {
+    return { closedFloor: closedBytes, lostPending: 0, lostBytes: prev.lostBytes };
+  }
+  let endedBytes = 0;
+  for (const [id, before] of Object.entries(prev.liveSessions)) {
+    const now = live[id];
+    if (!now || now.uptimeSec < before.uptimeSec) endedBytes += before.bytes;
+  }
+  const closedFloor = Math.max(closedBytes, prev.closedFloor + endedBytes);
+  const shortfall = closedFloor - closedBytes;
+  return { closedFloor, lostPending: shortfall, lostBytes: Math.min(shortfall, prev.lostPending) };
+}
+
 let syncInFlight: Promise<UsageRow[]> | null = null;
 
 /**
@@ -146,7 +210,8 @@ let syncInFlight: Promise<UsageRow[]> | null = null;
  * running total). Here nothing is accumulated: every run recomputes
  *   usage_banked_bytes          = the router's hotspot-user total (ended sessions)
  *   usage_current_session_bytes = sum of ALL live sessions for that PIN
- * which is exactly what RouterOS's own limit-bytes-total check uses.
+ * which is exactly what RouterOS's own limit-bytes-total check uses — plus
+ * usage_lost_bytes for sessions the router itself forgot (reconcileLostBytes).
  * Concurrent callers share one run.
  */
 export function syncUsageFromRouter(): Promise<UsageRow[]> {
@@ -165,6 +230,7 @@ async function doSync(): Promise<UsageRow[]> {
 
   const { rows: vouchers } = await pool.query(
     `SELECT v.pin, v.disabled, v.usage_banked_bytes, v.usage_current_session_bytes,
+            v.usage_live_sessions, v.usage_closed_floor, v.usage_lost_pending, v.usage_lost_bytes,
             p.bytes_limit, p.label
      FROM vouchers v JOIN plans p ON p.key = v.plan_key
      WHERE v.pin = ANY($1)`,
@@ -175,9 +241,25 @@ async function doSync(): Promise<UsageRow[]> {
   for (const v of vouchers) {
     const ru = routerUsage.get(v.pin)!;
     const liveBytes = ru.sessions.reduce((sum, s) => sum + s.bytesIn + s.bytesOut, 0);
+    const live: Record<string, LiveSessionMark> = {};
+    for (const s of ru.sessions) {
+      live[s.sessionId] = { bytes: s.bytesIn + s.bytesOut, uptimeSec: parseRouterUptime(s.uptime) };
+    }
+    const prevLost = Number(v.usage_lost_bytes);
+    const prevFloor = v.usage_closed_floor === null ? null : Number(v.usage_closed_floor);
+    const rec = reconcileLostBytes(
+      { liveSessions: v.usage_live_sessions, closedFloor: prevFloor, lostPending: Number(v.usage_lost_pending), lostBytes: prevLost },
+      ru.closedBytes,
+      live,
+    );
+
     const unchanged =
       Number(v.usage_banked_bytes) === ru.closedBytes &&
-      Number(v.usage_current_session_bytes) === liveBytes;
+      Number(v.usage_current_session_bytes) === liveBytes &&
+      Object.keys(v.usage_live_sessions ?? {}).length === 0 &&
+      prevFloor === rec.closedFloor &&
+      Number(v.usage_lost_pending) === rec.lostPending &&
+      prevLost === rec.lostBytes;
     if (unchanged && ru.sessions.length === 0) continue;
 
     for (const s of ru.sessions) {
@@ -190,13 +272,26 @@ async function doSync(): Promise<UsageRow[]> {
     await pool.query(
       `UPDATE vouchers
        SET usage_banked_bytes = $1, usage_current_session_bytes = $2, usage_current_session_id = $3,
-           usage_last_recorded_at = CASE WHEN $5::boolean THEN now() ELSE usage_last_recorded_at END
+           usage_last_recorded_at = CASE WHEN $5::boolean THEN now() ELSE usage_last_recorded_at END,
+           usage_live_sessions = $6::jsonb, usage_closed_floor = $7, usage_lost_pending = $8, usage_lost_bytes = $9
        WHERE pin = $4`,
-      [ru.closedBytes, liveBytes, ru.sessions[0]?.sessionId ?? null, v.pin, ru.sessions.length > 0],
+      [
+        ru.closedBytes, liveBytes, ru.sessions[0]?.sessionId ?? null, v.pin, ru.sessions.length > 0,
+        JSON.stringify(live), rec.closedFloor, rec.lostPending, rec.lostBytes,
+      ],
     );
 
     const bytesLimit = v.bytes_limit === null ? null : Number(v.bytes_limit);
-    const bytesUsed = ru.closedBytes + liveBytes;
+    const bytesUsed = ru.closedBytes + liveBytes + rec.lostBytes;
+
+    // The router's own cap counts only what it remembers, so shrink it by
+    // what it forgot — otherwise RouterOS lets the customer run past the plan.
+    if (bytesLimit !== null && !v.disabled && rec.lostBytes !== prevLost) {
+      console.log(`[usageService] voucher ${v.pin}: router lost ${rec.lostBytes} bytes of ended sessions - lowering its limit`);
+      await setHotspotUserLimit(v.pin, bytesLimit - rec.lostBytes).catch((err) =>
+        console.error(`[usageService] limit update failed for ${v.pin}:`, err.message),
+      );
+    }
     const overCap = bytesLimit !== null && bytesUsed >= bytesLimit;
     if (!v.disabled && overCap) {
       console.log(`[usageService] voucher ${v.pin} reached its cap - disabling (backup enforcement)`);
