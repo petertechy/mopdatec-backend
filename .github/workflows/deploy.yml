@@ -1,0 +1,48 @@
+# Auto-deploy to the VPS on every push to master — the same steps as
+# deploy/DEPLOY.md "Redeploying after a code change", run over SSH.
+#
+# Needs two repo secrets (Settings -> Secrets and variables -> Actions):
+#   VPS_HOST     the server IP
+#   VPS_SSH_KEY  private key whose .pub is in root's ~/.ssh/authorized_keys
+#
+# git pull is --ff-only on purpose: if someone edited files directly on the
+# VPS, the deploy fails loudly instead of overwriting their changes.
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency: deploy-vps
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Deploy over SSH
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+
+          ssh -o BatchMode=yes root@"$VPS_HOST" 'bash -se' <<'EOF'
+          set -euo pipefail
+          sudo -u mopdatec -H bash -c '
+            set -euo pipefail
+            cd /opt/mopdatec-backend
+            git pull --ff-only origin master
+            npm install --no-audit --no-fund
+            npm run build
+            node dist/db/migrate.js
+          '
+          systemctl restart mopdatec-backend
+          sleep 5
+          systemctl is-active mopdatec-backend
+          journalctl -u mopdatec-backend -n 20 --no-pager
+          EOF
