@@ -33,14 +33,19 @@ jobs:
 
           ssh -o BatchMode=yes root@"$VPS_HOST" 'bash -se' <<'EOF'
           set -euo pipefail
-          sudo -u mopdatec -H bash -c '
+          # Build as whoever owns the checkout (root on this VPS, despite the
+          # service running as mopdatec) so git/npm never hit permission errors.
+          OWNER=$(stat -c %U /opt/mopdatec-backend)
+          echo "== building as $OWNER"
+          sudo -u "$OWNER" -H bash -c '
             set -euo pipefail
             cd /opt/mopdatec-backend
-            git pull --ff-only origin master
-            npm install --no-audit --no-fund
-            npm run build
-            node dist/db/migrate.js
+            echo "== git pull";   git pull --ff-only origin master
+            echo "== npm install"; npm install --no-audit --no-fund
+            echo "== build";      npm run build
+            echo "== migrate";    node dist/db/migrate.js
           '
+          echo "== restart"
           systemctl restart mopdatec-backend
           sleep 5
           systemctl is-active mopdatec-backend
